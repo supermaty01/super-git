@@ -81,6 +81,14 @@ function buildRows(s: RepoSnapshot, visible: Set<string> | null, showStashes: bo
   return rows
 }
 
+/** the optional columns right of the message, with their default widths */
+const EXTRA_COLS = [
+  { id: 'author', label: 'AUTHOR', width: 150 },
+  { id: 'date', label: 'DATE / TIME', width: 140 },
+  { id: 'sha', label: 'SHA', width: 76 },
+  { id: 'changes', label: 'CHANGES', width: 110 }
+] as const
+
 interface PopState { index: number; groups: RefGroup[]; lane: number; x: number; y: number; width: number }
 
 export function Graph({ repo }: { repo: RepoView }) {
@@ -308,7 +316,14 @@ export function Graph({ repo }: { repo: RepoView }) {
   const onLabelsLeave = useCallback(() => schedulePopClose(), []) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => cancelPopClose(), [])
 
-  const resetWidths = () => { setCol({ graphColWidth: 0, refColWidth: 150 }); persist() }
+  const resetWidths = () => { setCol({ graphColWidth: 0, refColWidth: 150, colWidths: {} }); persist() }
+  const colW = (id: string) => layoutSettings.colWidths?.[id] ?? EXTRA_COLS.find((c) => c.id === id)?.width ?? 120
+  const resizeCol = (id: string, dx: number) => {
+    const l = useStore.getState().settings!.layout
+    if (id === 'ref') setCol({ refColWidth: Math.max(60, Math.min(500, l.refColWidth + dx)) })
+    else if (id === 'graph') setCol({ graphColWidth: Math.max(60, Math.min(800, (l.graphColWidth || autoGraphW) + dx)) })
+    else setCol({ colWidths: { ...(l.colWidths ?? {}), [id]: Math.max(48, Math.min(600, (l.colWidths?.[id] ?? EXTRA_COLS.find((c) => c.id === id)!.width) + dx)) } })
+  }
 
   const visible: ReactNode[] = []
   let prevBucket = ''
@@ -336,6 +351,7 @@ export function Graph({ repo }: { repo: RepoView }) {
         hovered={hover === r.key}
         dimmed={(search.open && search.hits.length > 0 && !hitSet.has(r.key)) || (!!hlSet && r.kind !== 'wip' && !hlSet.has(r.key)) || (authorFilter.length > 0 && r.kind !== 'wip' && !authorFilter.includes(r.commit.email.toLowerCase()))}
         colOrder={colOrder}
+        colWidths={layoutSettings.colWidths}
         dateLabel={showDate ? bucket : null}
         newRef={repo.newRef && r.kind !== 'wip' && repo.newRef.sha === r.commit.sha ? repo.newRef.kind : null}
         wip={r.kind === 'wip' ? s.status : null}
@@ -373,20 +389,18 @@ export function Graph({ repo }: { repo: RepoView }) {
         </div></div>
       ) : null}
       <div className="graph-header" onContextMenu={(e) => { e.preventDefault(); void graphHeaderMenu(path, resetWidths) }}>
-        {cols.ref ? <>
-          <div className={`graph-header-col${dragCol === 'ref' ? ' dragging' : ''}`} {...headerCol('ref')} style={{ width: refW, order: colOrder.ref * 2 }}>BRANCH / TAG</div>
-          <Resizer className="col-resizer" style={{ order: colOrder.ref * 2 + 1 }} onDrag={(dx) => setCol({ refColWidth: Math.max(60, Math.min(500, useStore.getState().settings!.layout.refColWidth + dx)) })} onEnd={persist} />
-        </> : null}
-        {cols.graph ? <>
-          <div className={`graph-header-col${dragCol === 'graph' ? ' dragging' : ''}`} {...headerCol('graph')} style={{ width: graphW, order: colOrder.graph * 2 }}>GRAPH</div>
-          <Resizer className="col-resizer" style={{ order: colOrder.graph * 2 + 1 }} onDrag={(dx) => setCol({ graphColWidth: Math.max(60, Math.min(800, (useStore.getState().settings!.layout.graphColWidth || autoGraphW) + dx)) })} onEnd={persist} />
-        </> : null}
+        {cols.ref ? <div className={`graph-header-col${dragCol === 'ref' ? ' dragging' : ''}`} {...headerCol('ref')} style={{ width: refW, order: colOrder.ref * 2 }}>BRANCH / TAG</div> : null}
+        {cols.graph ? <div className={`graph-header-col${dragCol === 'graph' ? ' dragging' : ''}`} {...headerCol('graph')} style={{ width: graphW, order: colOrder.graph * 2 }}>GRAPH</div> : null}
         {cols.message ? <div className="graph-header-col grow" {...headerCol('message')}>COMMIT MESSAGE</div> : <div className="graph-header-col grow" style={{ order: colOrder.message * 2 }} />}
-        {cols.author ? <div className="graph-header-col extra-col col-author" {...headerCol('author')}>AUTHOR</div> : null}
-        {cols.date ? <div className="graph-header-col extra-col col-date" {...headerCol('date')}>DATE / TIME</div> : null}
-        {cols.sha ? <div className="graph-header-col extra-col col-sha" {...headerCol('sha')}>SHA</div> : null}
-        {cols.changes ? <div className="graph-header-col extra-col col-changes" {...headerCol('changes')}>CHANGES</div> : null}
-        <span className="graph-header-icons">
+        {EXTRA_COLS.filter((c) => cols[c.id]).map((c) => (
+          <div key={c.id} className={`graph-header-col extra-col col-${c.id}${dragCol === c.id ? ' dragging' : ''}`} {...headerCol(c.id)} style={{ width: colW(c.id), order: colOrder[c.id] * 2 }}>{c.label}</div>
+        ))}
+        {/* every fixed-width column can be resized: on its right edge left of the message column, on its left edge right of it */}
+        {(['ref', 'graph', ...EXTRA_COLS.map((c) => c.id)] as const).filter((id) => cols[id]).map((id) => {
+          const before = colOrder[id] < colOrder.message
+          return <Resizer key={`rz-${id}`} className="col-resizer" style={{ order: colOrder[id] * 2 + (before ? 1 : -1) }} onDrag={(dx) => resizeCol(id, before ? dx : -dx)} onEnd={persist} />
+        })}
+        <span className="graph-header-icons" draggable={false} onMouseDown={(e) => e.stopPropagation()} onDragStart={(e) => { e.preventDefault(); e.stopPropagation() }}>
           <span className="graph-header-gear" title="Columns settings" onClick={() => graphHeaderMenu(path, resetWidths)}><Icon name="cog" /></span>
           {cols.author ? <span className={`graph-header-filter${authorFilter.length ? ' active' : ''}`} title="Filter the graph by author" onClick={() => setFilterOpen((v) => !v)}><Icon name="filter" /></span> : null}
         </span>
@@ -440,6 +454,7 @@ interface RowProps {
   dimmed: boolean
   dateLabel: string | null
   colOrder: Record<string, number>
+  colWidths?: Record<string, number>
   newRef: 'branch' | 'tag' | 'annotated-tag' | null
   wip: RepoSnapshot['status'] | null
   wipSummary: string
@@ -519,10 +534,10 @@ const GraphRow = memo(function GraphRow(p: RowProps) {
         )) : null}
         {p.dateLabel ? <span className="date-label">{p.dateLabel}</span> : null}
       </div>
-      {p.cols.author ? <div className="extra-col col-author" style={{ order: p.colOrder.author }}>{row.kind === 'commit' ? <span className="truncate">{row.commit.author}</span> : null}</div> : null}
-      {p.cols.date ? <div className="extra-col col-date" style={{ order: p.colOrder.date }}>{row.kind !== 'wip' ? fullDate(row.commit.date) : ''}</div> : null}
-      {p.cols.sha ? <div className="extra-col col-sha" style={{ order: p.colOrder.sha }}>{row.kind === 'commit' ? row.commit.sha.slice(0, 7) : ''}</div> : null}
-      {p.cols.changes ? <div className="extra-col col-changes" style={{ order: p.colOrder.changes }}>{p.stat ? <ChangesBar stat={p.stat} max={p.maxChanges} /> : null}</div> : null}
+      {p.cols.author ? <div className="extra-col col-author" style={{ order: p.colOrder.author, width: p.colWidths?.author }}>{row.kind === 'commit' ? <span className="truncate">{row.commit.author}</span> : null}</div> : null}
+      {p.cols.date ? <div className="extra-col col-date" style={{ order: p.colOrder.date, width: p.colWidths?.date }}>{row.kind !== 'wip' ? fullDate(row.commit.date) : ''}</div> : null}
+      {p.cols.sha ? <div className="extra-col col-sha" style={{ order: p.colOrder.sha, width: p.colWidths?.sha }}>{row.kind === 'commit' ? row.commit.sha.slice(0, 7) : ''}</div> : null}
+      {p.cols.changes ? <div className="extra-col col-changes" style={{ order: p.colOrder.changes, width: p.colWidths?.changes }}>{p.stat ? <ChangesBar stat={p.stat} max={p.maxChanges} /> : null}</div> : null}
     </div>
   )
 })

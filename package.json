@@ -1,7 +1,7 @@
 {
   "name": "super-git",
   "productName": "SuperGit",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A lightweight, local-only desktop Git client for Windows",
   "main": "./out/main/index.js",
   "author": "Mateo Álvarez",

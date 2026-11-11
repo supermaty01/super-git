@@ -1,3 +1,4 @@
+import { flashTip } from './Tooltip'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { RepoView } from '../store'
 import { useStore, setState, updateRepo } from '../store'
@@ -81,7 +82,7 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
       <WipBanner repo={repo} />
       <div className="commit-detail-header">
         <span className="commit-sha-label">commit:</span>
-        <span className="commit-sha" title="Copy commit sha" onClick={() => api.copy(commit.sha)}>{commit.sha.slice(0, 6)}</span>
+        <span className="commit-sha" title="Copy commit sha" onClick={(e) => { const el = e.currentTarget; void api.copy(commit.sha).then(() => flashTip(el, 'Copied!')) }}>{commit.sha.slice(0, 6)}</span>
       </div>
       <div className="commit-detail-scroll">
         <MessageBox>
@@ -167,7 +168,7 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
     <div className="commit-detail" onContextMenu={(e) => { if ((e.target as HTMLElement).closest('.file-row')) return; e.preventDefault(); void stashMenu(path, stash) }}>
       <div className="commit-detail-header">
         <span className="commit-sha-label">commit:</span>
-        <span className="commit-sha" title="Copy commit sha" onClick={() => api.copy(stash.sha)}>{stash.sha.slice(0, 6)}</span>
+        <span className="commit-sha" title="Copy commit sha" onClick={(e) => { const el = e.currentTarget; void api.copy(stash.sha).then(() => flashTip(el, 'Copied!')) }}>{stash.sha.slice(0, 6)}</span>
       </div>
       <div className="commit-detail-scroll">
         <MessageBox>

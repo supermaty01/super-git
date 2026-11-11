@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 
-interface Tip { text: string; x: number; y: number; place: 'top' | 'bottom'; shift: number }
+interface Tip { text: string; x: number; y: number; place: 'top' | 'bottom' | 'right'; shift: number }
+
+let flashTo: ((el: HTMLElement, text: string) => void) | null = null
+/** a short confirmation bubble to the right of an element, like the original's "Copied!" */
+export function flashTip(el: HTMLElement, text: string): void { flashTo?.(el, text) }
 
 /**
  * Global tooltip layer. Any element with a `title` gets the original's dark bootstrap-style tooltip
@@ -45,6 +49,14 @@ export function TooltipLayer() {
         setTip({ text, x: r.left + r.width / 2, y: below ? r.bottom + 5 : r.top - 5, place: below ? 'bottom' : 'top', shift: 0 })
       }, 450)
     }
+    let flashTimer: number | null = null
+    flashTo = (el, text) => {
+      clear()
+      if (flashTimer) window.clearTimeout(flashTimer)
+      const r = el.getBoundingClientRect()
+      setTip({ text, x: r.right + 6, y: r.top + r.height / 2, place: 'right', shift: 0 })
+      flashTimer = window.setTimeout(() => { flashTimer = null; setTip(null) }, 1500)
+    }
     const onDown = () => clear()
     // the element under the tooltip can disappear or stop being hovered without any mouse event
     // (re-render after a click, keyboard shortcut): drop the tooltip then too
@@ -59,6 +71,8 @@ export function TooltipLayer() {
     document.addEventListener('wheel', onDown, { capture: true, passive: true })
     window.addEventListener('blur', onDown)
     return () => {
+      flashTo = null
+      if (flashTimer) window.clearTimeout(flashTimer)
       window.clearInterval(watch)
       document.removeEventListener('click', onDown, true)
       document.removeEventListener('keydown', onDown, true)
@@ -76,6 +90,7 @@ export function TooltipLayer() {
     const el = tipRef.current
     if (!el) return
     const w = el.offsetWidth, h = el.offsetHeight
+    if (tip.place === 'right') { setPos({ left: tip.x, top: tip.y - h / 2, shift: 0 }); return }
     let left = tip.x - w / 2
     const min = 4, max = window.innerWidth - w - 4
     const clamped = Math.max(min, Math.min(max, left))

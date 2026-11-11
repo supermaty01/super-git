@@ -250,7 +250,7 @@ export interface Settings {
   fileListMode: 'path' | 'tree'
   defaultPullMode: PullMode
   commitLimit: number
-  layout: { leftWidth: number; rightWidth: number; refColWidth: number; graphColWidth: number; leftOpen: boolean; rightOpen?: boolean }
+  layout: { leftWidth: number; rightWidth: number; refColWidth: number; graphColWidth: number; leftOpen: boolean; rightOpen?: boolean; /** widths of the author / date / sha / changes columns */ colWidths?: Record<string, number> }
   defaultCloneDir: string
   azure: { orgUrl: string; hasToken: boolean; userName?: string }
   tabs: TabInfo[]
