@@ -2,6 +2,14 @@
 
 A lightweight, local-only desktop Git client for Windows, centred on a fast, readable branch graph. Everything runs on your machine through the git CLI: no account, no cloud service and no AI features.
 
+## Install
+
+1. Install [Git for Windows](https://git-scm.com/download/win) if you don't have it (SuperGit runs on top of it; the installer offers the download page when Git is missing).
+2. Download the latest **`SuperGit-Setup-<version>.exe`** from [Releases](https://github.com/supermaty01/super-git/releases/latest) and run it. It installs for your user only (no administrator rights needed), lets you pick the folder or install for all users, and adds Start menu and desktop shortcuts.
+3. Prefer not to install? Download **`SuperGit-<version>-portable.exe`** from the same page and run it from anywhere.
+
+The installers are not code-signed yet, so Windows SmartScreen may show "Windows protected your PC": choose **More info → Run anyway**. Installing a newer version over an older one keeps your settings and open tabs.
+
 ## Features
 
 | Area | What you get |

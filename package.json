@@ -1,8 +1,8 @@
 {
   "name": "super-git",
   "productName": "SuperGit",
-  "version": "1.0.0",
-  "description": "A lightweight, local-only Git client",
+  "version": "1.1.0",
+  "description": "A lightweight, local-only desktop Git client for Windows",
   "main": "./out/main/index.js",
   "author": "Mateo Álvarez",
   "license": "UNLICENSED",
@@ -61,17 +61,42 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
-      "perMachine": false
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "SuperGit",
+      "menuCategory": false,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/uninstallerSidebar.bmp",
+      "include": "build/installer.nsh",
+      "artifactName": "SuperGit-Setup-${version}.exe",
+      "uninstallDisplayName": "SuperGit"
     },
     "asarUnpack": [
       "**/node_modules/@lydell/**"
-    ]
-  }
+    ],
+    "portable": {
+      "artifactName": "SuperGit-${version}-portable.exe"
+    }
+  },
+  "homepage": "https://github.com/supermaty01/super-git"
 }
