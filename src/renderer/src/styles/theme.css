@@ -1,0 +1,116 @@
+/* Dark theme tokens (resolved values measured from the reference UI). */
+:root {
+  --white: #ffffff;
+  --red: #d9413d;
+  --orange: #de9b43;
+  --yellow: #ecb91c;
+  --green: #5cb85c;
+  --teal: #2ece9d;
+  --blue: #4d88ff;
+  --ltblue: #5bc0de;
+  --purple: #c517b6;
+
+  --app__bg0: #090a0b;
+  --toolbar__bg0: rgb(23, 25, 28);
+  --toolbar__bg1: rgb(32, 35, 39);
+  --toolbar__bg2: rgb(46, 50, 56);
+  --panel__bg0: rgb(21, 23, 25);
+  --panel__bg1: rgb(30, 33, 36);
+  --panel__bg2: rgb(39, 43, 47);
+  --input__bg: rgba(0, 0, 0, 0.2);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --section-border: rgba(255, 255, 255, 0.08);
+  --subtle-border: rgba(255, 255, 255, 0.04);
+  --modal-overlay-color: rgba(0, 0, 0, 0.5);
+
+  --text-selected: #ffffff;
+  --text-normal: rgba(255, 255, 255, 0.78);
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --text-disabled: rgba(255, 255, 255, 0.45);
+  --text-accent: #93a9ec;
+  --text-inverse: #222222;
+  --text-dimmed: rgba(255, 255, 255, 0.2);
+  --text-dimmed-selected: rgba(255, 255, 255, 0.5);
+
+  --hover-row: rgba(77, 136, 255, 0.15);
+  --selected-row: rgba(77, 136, 255, 0.2);
+  --link-color: #40c5ec;
+  --form-control-focus: #4d88ff;
+  --scroll-thumb-bg: rgba(255, 255, 255, 0.15);
+  --wip-status: rgba(77, 136, 255, 0.4);
+  --droppable: rgba(236, 185, 28, 0.3);
+  --drop-target: rgba(92, 184, 92, 0.5);
+
+  --graph-color-0: #15a0bf;
+  --graph-color-1: #0669f7;
+  --graph-color-2: #8e00c2;
+  --graph-color-3: #c517b6;
+  --graph-color-4: #d90171;
+  --graph-color-5: #cd0101;
+  --graph-color-6: #f25d2e;
+  --graph-color-7: #f2ca33;
+  --graph-color-8: #7bd938;
+  --graph-color-9: #2ece9d;
+
+  --added-line: rgba(92, 184, 92, 0.2);
+  --deleted-line: rgba(217, 65, 61, 0.2);
+  --conflict-left-border-color: #15a0bf;
+  --conflict-left-color: rgba(21, 160, 191, 0.25);
+  --conflict-right-border-color: #f2ca33;
+  --conflict-right-color: rgba(242, 202, 51, 0.25);
+  --conflict-output-border-color: #c517b6;
+  --conflict-output-color: rgba(197, 23, 182, 0.25);
+
+  --font-default: 'Open Sans', Arial, sans-serif;
+  --code-font: Consolas, 'Monaco', 'Menlo', 'Ubuntu Mono', 'source-code-pro', monospace;
+
+  --tabs-bar-height: 34px;
+  --toolbar-height: 48px;
+  --graph-row-height: 28px;
+  --status-bar-height: 26px;
+}
+
+/* Light theme (resolved from the reference light theme) */
+[data-theme='light'] {
+  --red: #9f1a16;
+  --green: #00a857;
+  --teal: #00c1cd;
+  --app__bg0: #fcfcfc;
+  --toolbar__bg0: #fafafa;
+  --toolbar__bg1: #ebebeb;
+  --toolbar__bg2: #fafafa;
+  --panel__bg0: #f3f3f3;
+  --panel__bg1: #fafafa;
+  --panel__bg2: #f0f0f0;
+  --input__bg: #ffffff7f;
+  --panel-border: #c6c6c6;
+  --section-border: #cccccc;
+  --subtle-border: #e6e6e6;
+  --modal-overlay-color: #c8c8c899;
+  --text-selected: #000000;
+  --text-normal: rgba(0, 0, 0, 0.75);
+  --text-secondary: rgba(0, 0, 0, 0.6);
+  --text-disabled: rgba(0, 0, 0, 0.4);
+  --text-accent: #395bbf;
+  --text-inverse: #ffffff;
+  --text-dimmed: #00000033;
+  --text-dimmed-selected: #00000080;
+  --hover-row: #5f8eed19;
+  --selected-row: #5f8eed33;
+  --link-color: #005c95;
+  --scroll-thumb-bg: #00000026;
+  --added-line: rgba(0, 168, 87, 0.15);
+  --deleted-line: rgba(159, 26, 22, 0.15);
+  --conflict-left-color: rgba(21, 160, 191, 0.2);
+  --conflict-right-color: rgba(242, 202, 51, 0.3);
+  --conflict-output-color: rgba(197, 23, 182, 0.15);
+}
+[data-theme='light'] .tabs-bar, [data-theme='light'] .toolbar { --text-normal: rgba(0,0,0,.8); --text-secondary: rgba(0,0,0,.6); }
+[data-theme='light'] .toolbar-btn:hover:not(:disabled) { background: rgba(0,0,0,.05); }
+[data-theme='light'] .crumb-text, [data-theme='light'] .file-view-title, [data-theme='light'] .mt-file { color: #000; }
+[data-theme='light'] { --toggle-border: rgba(0,0,0,.2); }
+[data-theme='light'] .hsplit-grip { background: rgba(0,0,0,.15); }
+[data-theme='light'] .commit-message-box { background: #fff; }
+[data-theme='light'] .pill { color: #fff; }
+[data-theme='light'] .hunk-line .code, [data-theme='light'] .blame-line .code { color: #333; }
+[data-theme='light'] .wip-banner { background: #5f8eed; }
