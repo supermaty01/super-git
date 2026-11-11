@@ -1,4 +1,4 @@
-import type {
+import type { AutoStash, UndoPreview,
   RepoSnapshot, WorkingStatus, FileChange, FileContext, FileContents, ConflictSides, BlameLine, Commit, ResetMode, PullMode,
   RebaseTodoItem, OpResult, Settings, MenuItemSpec, ProviderId, ProviderAccount, ProviderConnectOptions, HostedRepo, CommitOptions, StashMode, CommitStat, GitflowConfig, LfsInfo, SshKey, GpgKey, GitKrakenRepo
 } from './types'
@@ -33,9 +33,22 @@ export interface Api {
   gitInfo(): Promise<{ path: string; version: string; readOnly: boolean }>
   /** repositories open in GitKraken and what is hidden in each; null when it is not installed. Read-only. */
   gitkrakenScan(): Promise<GitKrakenRepo[] | null>
+  /** GitKraken preferences SuperGit has an equivalent for */
+  gitkrakenSettings(): Promise<Partial<Settings>>
+  /** the folder SuperGit was started with (Explorer "Open with SuperGit"), once */
+  takeStartupFolder(): Promise<string | null>
+  /** true once after the installer's "Import from GitKraken" option */
+  takeGitKrakenImportFlag(): Promise<boolean>
   /** keeps the application menu's checkmarks and favorites in step with the app */
   setMenuState(state: { hasRepo?: boolean; leftPanel?: boolean; detailPanel?: boolean; terminal?: boolean; favorites?: string[] }): Promise<void>
   showAbout(): Promise<void>
+  /** compacts the repository (git gc) */
+  maintenance(p: string): Promise<void>
+  sparseCheckout(p: string): Promise<{ enabled: boolean; patterns: string[] }>
+  /** null turns sparse checkout off */
+  sparseCheckoutSet(p: string, patterns: string[] | null): Promise<void>
+  gpgPublicKey(key: string): Promise<string>
+  activityLog(): Promise<Array<{ time: number; repo: string; args: string; ms: number; code: number; error?: string }>>
 
   // repo lifecycle
   resolveRepo(p: string): Promise<{ root: string; gitDir: string } | null>
@@ -53,7 +66,7 @@ export interface Api {
   fileContents(p: string, ctx: FileContext, ignoreWhitespace: boolean): Promise<FileContents>
   conflictSides(p: string, file: string): Promise<ConflictSides>
   blame(p: string, file: string, sha?: string): Promise<BlameLine[]>
-  fileHistory(p: string, file: string): Promise<Array<Commit & { path: string }>>
+  fileHistory(p: string, file: string, from?: string): Promise<Array<Commit & { path: string }>>
   searchCommits(p: string, q: string): Promise<string[]>
   lastCommitMessage(p: string): Promise<string>
   isAncestor(p: string, a: string, b: string): Promise<boolean>
@@ -72,9 +85,11 @@ export interface Api {
   resolveWithSide(p: string, file: string, side: 'ours' | 'theirs'): Promise<void>
 
   // refs
-  checkout(p: string, target: string): Promise<void>
+  /** checks out; local changes that are in the way are stashed and popped again */
+  checkout(p: string, target: string): Promise<AutoStash | undefined>
   restoreFile(p: string, sha: string, file: string): Promise<void>
-  checkoutRemote(p: string, remoteShort: string, localExists: boolean): Promise<string>
+  /** newName: create that branch at the remote one; reset: move the existing local branch to it */
+  checkoutRemote(p: string, remoteShort: string, localExists: boolean, opts?: { newName?: string; reset?: boolean }): Promise<string>
   createBranch(p: string, name: string, at: string, checkout: boolean): Promise<void>
   deleteBranch(p: string, name: string, force: boolean): Promise<void>
   deleteRemoteBranch(p: string, remote: string, branch: string): Promise<void>
@@ -84,6 +99,9 @@ export interface Api {
   createTag(p: string, name: string, at: string, message?: string): Promise<void>
   deleteTag(p: string, name: string): Promise<void>
   deleteRemoteTag(p: string, remote: string, name: string): Promise<void>
+  moveTag(p: string, name: string, to: string): Promise<void>
+  /** tag names per remote (ls-remote); null = unreachable */
+  remoteTags(p: string): Promise<Record<string, string[] | null>>
   pushTag(p: string, remote: string, name: string): Promise<void>
   addRemote(p: string, name: string, url: string): Promise<void>
   removeRemote(p: string, name: string): Promise<void>
@@ -93,8 +111,8 @@ export interface Api {
   merge(p: string, ref: string, opts?: { noFF?: boolean; ffOnly?: boolean; squash?: boolean }): Promise<OpResult>
   rebase(p: string, onto: string): Promise<OpResult>
   interactiveRebase(p: string, base: string | null, items: RebaseTodoItem[]): Promise<OpResult>
-  cherryPick(p: string, shas: string[]): Promise<OpResult>
-  revert(p: string, sha: string, isMerge: boolean): Promise<OpResult>
+  cherryPick(p: string, shas: string[], noCommit?: boolean): Promise<OpResult>
+  revert(p: string, sha: string, isMerge: boolean, noCommit?: boolean): Promise<OpResult>
   reset(p: string, sha: string, mode: ResetMode): Promise<OpResult>
   continueOp(p: string, kind: string, message?: string): Promise<OpResult>
   abortOp(p: string, kind: string): Promise<OpResult>
@@ -113,14 +131,17 @@ export interface Api {
 
   // worktrees
   addWorktree(p: string, dir: string, opts: { branch?: string; newBranch?: string; commit?: string }): Promise<void>
+  validateWorktree(p: string, o: { ref: string; branch: string; createBranch: boolean; dir: string }): Promise<{ level: 'error' | 'warning'; message: string } | null>
   removeWorktree(p: string, dir: string, force: boolean): Promise<void>
   pruneWorktrees(p: string): Promise<void>
+  /** reason: optional lock message; null unlocks */
+  lockWorktree(p: string, dir: string, reason: string | null): Promise<void>
 
   // network
   fetchAll(p: string, quiet?: boolean): Promise<void>
   fetchRemote(p: string, remote: string): Promise<void>
   pull(p: string, mode: PullMode): Promise<OpResult>
-  push(p: string, opts: { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean }): Promise<OpResult>
+  push(p: string, opts: { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean; noLease?: boolean }): Promise<OpResult>
 
   // extras
   compareFiles(p: string, a: string, b: string | null): Promise<FileChange[]>
@@ -144,6 +165,8 @@ export interface Api {
   createPatch(p: string, shasOldestFirst: string[], outFile: string): Promise<void>
   applyPatch(p: string, file: string, asCommits: boolean): Promise<OpResult>
   submoduleUpdate(p: string, sub?: string): Promise<void>
+  /** "Delete this submodule": deinit, remove it from the index and .gitmodules, and drop its git dir */
+  deleteSubmodule(p: string, sub: string, commit?: boolean): Promise<void>
   submoduleAdd(p: string, url: string, subPath: string): Promise<void>
   submoduleSync(p: string): Promise<void>
   openInEditor(p: string, file: string | null): Promise<void>
@@ -161,9 +184,10 @@ export interface Api {
   termKill(id: number): Promise<void>
 
   // undo / redo
-  undo(p: string): Promise<string | null>
-  redo(p: string): Promise<string | null>
-  undoState(p: string): Promise<{ undo: string | null; redo: string | null }>
+  /** returns what was undone (for the toast), or null when nothing was done */
+  undo(p: string, opts?: { stash?: boolean }): Promise<string | null>
+  redo(p: string, opts?: { stash?: boolean }): Promise<string | null>
+  undoState(p: string): Promise<{ undo: UndoPreview; redo: UndoPreview }>
 }
 
 export interface Events {

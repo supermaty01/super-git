@@ -19,6 +19,27 @@ async function readJson(file: string): Promise<Record<string, unknown> | null> {
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
 
+/** The few GitKraken preferences SuperGit has an equivalent for (read only). */
+export async function gitkrakenSettings(): Promise<Record<string, unknown>> {
+  const profilesDir = path.join(dataDir(), 'profiles')
+  let ids: string[] = []
+  try { ids = (await fs.readdir(profilesDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name) } catch { return {} }
+  for (const id of ids) {
+    const p = await readJson(path.join(profilesDir, id, 'profile'))
+    if (!p) continue
+    const get = (a: string, b?: string): unknown => { const v = p[a] as Record<string, unknown> | undefined; return b ? (v && typeof v === 'object' ? v[b] : undefined) : v }
+    const out: Record<string, unknown> = {}
+    const zoom = get('zoom'); if (typeof zoom === 'number' && zoom >= 0.5 && zoom <= 2) out.zoom = zoom
+    const diff = get('fileView', 'diffDisplayMode'); if (diff === 'hunk' || diff === 'inline' || diff === 'split') out.diffMode = diff
+    const list = get('fileNodeList', 'viewMode'); if (list === 'tree') out.fileListMode = 'tree'; else if (list === 'full_path') out.fileListMode = 'path'
+    const ef = get('editor', 'fontFamily'); if (typeof ef === 'string' && ef) out.editorFont = ef
+    const tf = get('cli', 'fontFamily'); if (typeof tf === 'string' && tf) out.terminalFont = tf
+    const theme = get('ui', 'theme'); if (typeof theme === 'string') out.theme = /light/i.test(theme) ? 'light' : 'dark'
+    return out
+  }
+  return {}
+}
+
 /** null when the client is not installed (no profile folder). */
 export async function scanGitKraken(): Promise<GitKrakenRepo[] | null> {
   const profilesDir = path.join(dataDir(), 'profiles')

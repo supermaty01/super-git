@@ -26,12 +26,12 @@ export function Modals() {
     case 'prefs': body = <PrefsModal section={p.section as string | undefined} />; break
     case 'repoPrefs': body = <RepoPrefsModal path={p.path as string} section={p.section as string | undefined} />; break
     case 'shortcuts': body = <ShortcutsModal />; break
+    case 'activity': body = <ActivityModal />; break
     case 'push': body = <PushModal path={p.path as string} branch={p.branch as string} />; break
     case 'remote': body = <RemoteModal path={p.path as string} remote={p.remote as Remote | undefined} />; break
-    case 'worktree': body = <WorktreeModal path={p.path as string} branch={p.branch as string | undefined} commit={p.commit as string | undefined} dir={p.dir as string} />; break
   }
   return (
-    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) closeModal() }}>
+    <div className={`modal-overlay${modal.kind === 'prefs' || modal.kind === 'repoPrefs' ? ' prefs-overlay' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) closeModal() }}>
       {body}
     </div>
   )
@@ -117,10 +117,17 @@ function CloneModal() {
       void api.setSettings({ defaultCloneDir: dir })
       setState((s) => ({ settings: { ...s.settings!, defaultCloneDir: dir }, progress: null }))
       closeModal()
-      toast({ kind: 'success', title: `Cloned ${n}` })
+      toast({ kind: 'success', title: `Successfully cloned repo '${n}'` })
       await A.openRepo(dest)
     } catch (e) {
-      toast({ kind: 'error', title: 'Clone failed', message: errMsg(e) })
+      const msg = errMsg(e)
+      if (msg.startsWith('SUBMODULES:')) {
+        // the repository itself is there: open it and say which part failed
+        void api.setSettings({ defaultCloneDir: dir })
+        closeModal()
+        toast({ kind: 'info', title: `Cloned '${n}', but some submodules could not be fetched`, message: msg.slice('SUBMODULES:'.length).trim().slice(0, 300) }, 10000)
+        await A.openRepo(dest)
+      } else toast({ kind: 'error', title: 'Clone failed', message: msg.split('\n').slice(0, 4).join('\n').slice(0, 400) })
     } finally {
       setBusy(false)
       setState({ progress: null })
@@ -175,7 +182,7 @@ function CloneModal() {
                 <input type="checkbox" checked={recurse} onChange={(e) => setRecurse(e.target.checked)} />
                 <span />
               </div>
-              {full ? <div className="form-grid-row"><span className="form-label">Full path</span><span className="text-secondary">{full}</span><span /></div> : null}
+              {full ? <div className="form-grid-row"><span className="form-label">Full path</span><span className="text-secondary full-path">{full}</span><span /></div> : null}
               <div className="clone-actions">
                 {busy ? <span className="clone-progress"><Icon name="spinner" spin /> {progress}</span> : null}
                 <button className="btn btn-success btn-small" disabled={busy || !name} onClick={() => clone()}>Clone the repo!</button>
@@ -226,19 +233,19 @@ function InitModal() {
         <button className="btn btn-primary btn-small" onClick={async () => { const d = await api.pickDirectory('Initialize in', dir); if (d) setDir(d) }}>Browse</button>
       </div>
       <div className="form-grid-row">
-        <span className="form-label">Default branch</span>
+        <span className="form-label">Default branch name</span>
         <input className="form-control narrow" value={branch} onChange={(e) => setBranch(e.target.value.replace(/\s/g, '-'))} />
         <span />
       </div>
       <div className="form-grid-row">
-        <span className="form-label">.gitignore template</span>
+        <span className="form-label">.gitignore Template (optional)</span>
         <select className="form-control" value={gitignore} onChange={(e) => setGitignore(e.target.value)}>
           {Object.keys(GITIGNORE_TEMPLATES).map((k) => <option key={k}>{k}</option>)}
         </select>
         <span />
       </div>
       <div className="form-grid-row">
-        <span className="form-label">License</span>
+        <span className="form-label">License (optional)</span>
         <select className="form-control" value={license} onChange={(e) => setLicense(e.target.value)}>
           {LICENSES.map((k) => <option key={k}>{k}</option>)}
         </select>
@@ -249,7 +256,7 @@ function InitModal() {
         <input type="checkbox" checked={readme} onChange={(e) => setReadme(e.target.checked)} />
         <span />
       </div>
-      {full ? <div className="form-grid-row"><span className="form-label">Full path</span><span className="text-secondary">{full}</span><span /></div> : null}
+      {full ? <div className="form-grid-row"><span className="form-label">Full path</span><span className="text-secondary full-path">{full}</span><span /></div> : null}
     </ModalFrame>
   )
 }
@@ -299,44 +306,32 @@ function RemoteModal({ path, remote }: { path: string; remote?: Remote }) {
   )
 }
 
-function WorktreeModal({ path, branch, commit, dir: initialDir }: { path: string; branch?: string; commit?: string; dir: string }) {
-  const s = A.snap(path)
-  const locals = s.refs.filter((r) => r.type === 'head' && !r.isCurrent && !s.worktrees.some((w) => w.branch === r.short))
-  const [mode, setMode] = useState<'existing' | 'new' | 'detached'>(branch ? 'existing' : commit ? 'new' : 'existing')
-  const [existing, setExisting] = useState(branch ?? locals[0]?.short ?? '')
-  const [newName, setNewName] = useState('')
-  const [dir, setDir] = useState(initialDir)
-  const [openAfter, setOpenAfter] = useState(true)
-  const submit = async () => {
-    closeModal()
-    const opts = mode === 'existing' ? { branch: existing } : mode === 'new' ? { newBranch: newName.trim(), commit: commit ?? s.head.sha } : { commit: commit ?? s.head.sha }
-    const ok = await A.run(path, async () => { await api.addWorktree(path, dir, opts); return true }, { errorTitle: 'Could not create worktree' })
-    if (ok && openAfter) await A.openRepo(dir)
-  }
+/** the git commands SuperGit ran, newest first (failures always included) */
+function ActivityModal() {
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof api.activityLog>> | null>(null)
+  const [q, setQ] = useState('')
+  useEffect(() => {
+    const load = () => { void api.activityLog().then(setRows) }
+    load()
+    const t = window.setInterval(load, 2000)
+    return () => window.clearInterval(t)
+  }, [])
+  const shown = (rows ?? []).filter((r) => !q.trim() || `${r.repo} ${r.args}`.toLowerCase().includes(q.trim().toLowerCase()))
   return (
-    <ModalFrame title="Create Worktree" width={620} footer={<><button className="btn btn-default btn-medium" onClick={closeModal}>Cancel</button><button className="btn btn-success btn-medium" disabled={(mode === 'existing' && !existing) || (mode === 'new' && !newName.trim())} onClick={submit}>Create Worktree</button></>}>
-      <div className="form-grid-row"><span className="form-label">Folder</span>
-        <input className="form-control" value={dir} onChange={(e) => setDir(e.target.value)} />
-        <button className="btn btn-primary btn-small" onClick={async () => { const d = await api.pickDirectory('Worktree folder', dir); if (d) setDir(d) }}>Browse</button>
+    <ModalFrame title="Activity Log" width={860}>
+      <input className="form-control mb2" placeholder="Filter" value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="activity-list">
+        {shown.map((r, i) => (
+          <div key={i} className={`activity-row${r.code ? ' failed' : ''}`} title={r.error}>
+            <span className="activity-time">{new Date(r.time).toLocaleTimeString()}</span>
+            <span className="activity-repo truncate">{r.repo}</span>
+            <span className="activity-cmd truncate">git {r.args}</span>
+            <span className="activity-ms">{r.ms} ms</span>
+            {r.code ? <span className="activity-error truncate">{r.error || `exit code ${r.code}`}</span> : null}
+          </div>
+        ))}
+        {rows && !shown.length ? <div className="text-secondary">Nothing logged yet.</div> : null}
       </div>
-      <div className="form-grid-row"><span className="form-label">Checkout</span>
-        <select className="form-control" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-          <option value="existing">Existing branch</option>
-          <option value="new">New branch {commit ? `at ${commit.slice(0, 7)}` : 'at HEAD'}</option>
-          <option value="detached">Detached {commit ? commit.slice(0, 7) : 'HEAD'}</option>
-        </select><span />
-      </div>
-      {mode === 'existing' ? (
-        <div className="form-grid-row"><span className="form-label">Branch</span>
-          <select className="form-control" value={existing} onChange={(e) => setExisting(e.target.value)}>
-            {branch && !locals.some((l) => l.short === branch) ? <option value={branch}>{branch}</option> : null}
-            {locals.map((l) => <option key={l.short} value={l.short}>{l.short}</option>)}
-          </select><span />
-        </div>
-      ) : mode === 'new' ? (
-        <div className="form-grid-row"><span className="form-label">New branch name</span><input className="form-control" autoFocus value={newName} onChange={(e) => setNewName(e.target.value.replace(/\s/g, '-'))} /><span /></div>
-      ) : null}
-      <label className="form-check"><input type="checkbox" checked={openAfter} onChange={(e) => setOpenAfter(e.target.checked)} /> Open the worktree in a new tab</label>
     </ModalFrame>
   )
 }

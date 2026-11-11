@@ -3,7 +3,7 @@ import { api, bridge } from './lib/api'
 import {
   getState, setState, updateRepo, newRepoView, toast, openModal, showPrompt, MGMT_TAB, type RepoView, type Selection, type CenterView
 } from './store'
-import type { RepoSnapshot, Ref, Commit, FileChange, FileContext, OpResult, ResetMode, PullMode, RebaseTodoItem, Stash, Worktree, MenuItemSpec, TabInfo } from '@shared/types'
+import type { RepoSnapshot, Ref, Commit, FileChange, FileContext, OpResult, ResetMode, PullMode, RebaseTodoItem, Stash, Worktree, MenuItemSpec, TabInfo, AutoStash } from '@shared/types'
 import { errMsg, basename } from './lib/format'
 
 // ---------------------------------------------------------------------------------------------
@@ -27,6 +27,15 @@ export async function init(): Promise<void> {
   window.addEventListener('focus', () => { const t = activeTab(); if (t) void refresh(t.path) })
   if (active !== MGMT_TAB) await activateTab(active)
   startAutoFetch()
+  // first start after the installer's "Import from GitKraken": its open repositories, hidden branches and preferences
+  if (await api.takeGitKrakenImportFlag().catch(() => false)) {
+    const prefs = await api.gitkrakenSettings().catch(() => ({}))
+    if (Object.keys(prefs).length) setState((s) => ({ settings: s.settings ? { ...s.settings, ...prefs } : s.settings }))
+    if (Object.keys(prefs).length) await api.setSettings(prefs)
+    await (await import('./actions2')).importFromGitKraken()
+  }
+  const folder = await api.takeStartupFolder().catch(() => null)
+  if (folder) await openRepo(folder)
 }
 
 function activeTab(): TabInfo | undefined {
@@ -54,7 +63,7 @@ export async function activateTab(id: string): Promise<void> {
   if (!tab) { await watchOnly(null); return }
   const s = getState()
   if (!s.repos[tab.path]) {
-    setState({ repos: { ...s.repos, [tab.path]: newRepoView(tab.path, s.settings?.commitLimit ?? 2000) } })
+    setState({ repos: { ...s.repos, [tab.path]: newRepoView(tab.path, s.settings?.showAllCommits ? 1_000_000 : s.settings?.commitLimit ?? 2000) } })
   }
   await watchOnly(tab.path)
   await refresh(tab.path)
@@ -191,13 +200,13 @@ export async function loadMore(path: string): Promise<void> {
 // ---------------------------------------------------------------------------------------------
 // generic runners
 
-interface RunOpts { busy?: string; success?: string; errorTitle?: string; refresh?: boolean }
+interface RunOpts { busy?: string; success?: string; successMessage?: string; errorTitle?: string; refresh?: boolean }
 
 export async function run<T>(path: string, fn: () => Promise<T>, opts: RunOpts = {}): Promise<T | undefined> {
   if (opts.busy) updateRepo(path, { busy: opts.busy })
   try {
     const r = await fn()
-    if (opts.success) toast({ kind: 'success', title: opts.success })
+    if (opts.success) toast({ kind: 'success', title: opts.success, message: opts.successMessage }, 4000)
     return r
   } catch (e) {
     toast({ kind: 'error', title: opts.errorTitle ?? 'Something went wrong', message: errMsg(e) })
@@ -209,16 +218,31 @@ export async function run<T>(path: string, fn: () => Promise<T>, opts: RunOpts =
   }
 }
 
-export async function runOp(path: string, fn: () => Promise<OpResult>, what: string, busy?: string): Promise<OpResult | undefined> {
+export async function runOp(path: string, fn: () => Promise<OpResult>, what: string, busy?: string, success?: { title: string; message?: string }): Promise<OpResult | undefined> {
   const res = await run(path, fn, { busy })
   if (!res) return res
   if (res.conflicts) {
-    toast({ kind: 'info', title: `${what} resulted in conflicts`, message: 'Resolve the conflicted files in the commit panel, then continue.' }, 8000)
+    toast({ kind: 'error', title: `${what} Failed`, message: 'There are merge conflicts that need to be resolved' }, 8000)
     updateRepo(path, { selection: { kind: 'wip' } })
   } else if (!res.ok) {
-    toast({ kind: 'error', title: `${what} failed`, message: res.error })
+    toast({ kind: 'error', title: `${what} Failed`, message: res.error })
+  } else if (success) {
+    toast({ kind: 'success', ...success }, 4000)
   }
+  autoStashNotice(res.autoStash)
   return res
+}
+
+/** the original's notice when local changes had to be stashed and could not be restored */
+export function autoStashNotice(a: AutoStash | undefined): void {
+  if (a === 'kept') toast({ kind: 'info', title: 'Uncommitted Changes Stashed', message: 'There were uncommitted changes that have been stashed to prevent losing them.' }, 8000)
+}
+
+const ok = (title: string, message?: string) => toast({ kind: 'success', title, message }, 4000)
+
+/** the original's confirmation bar for destructive actions */
+function confirmDestructive(message: string, label: string, act: () => unknown): void {
+  showPrompt({ kind: 'confirm', message, buttons: [{ label, style: 'danger', run: act }] })
 }
 
 export const repoView = (path: string): RepoView => getState().repos[path]
@@ -239,11 +263,14 @@ export function selectCommit(path: string, sha: string, mod: { ctrl?: boolean; s
       return { selection: shas.length ? { kind: 'commits', shas, anchor: sha } : null, fileSel: [] }
     }
     if (mod.shift && sel?.kind === 'commits' && order) {
-      const a = order.indexOf(sel.anchor)
+      // like the original, Shift-click adds to the selection: the rows from the nearest selected commit to the clicked one
       const b = order.indexOf(sha)
-      if (a >= 0 && b >= 0) {
+      const picked = sel.shas.map((x) => order.indexOf(x)).filter((i) => i >= 0)
+      if (b >= 0 && picked.length) {
+        const a = picked.reduce((best, i) => (Math.abs(i - b) < Math.abs(best - b) ? i : best), picked[0])
         const [lo, hi] = a < b ? [a, b] : [b, a]
-        return { selection: { kind: 'commits', shas: order.slice(lo, hi + 1), anchor: sel.anchor }, fileSel: [] }
+        const shas = [...sel.shas, ...order.slice(lo, hi + 1).filter((x) => x !== '__wip__' && !sel.shas.includes(x))]
+        return { selection: { kind: 'commits', shas, anchor: sel.anchor }, fileSel: [] }
       }
     }
     return { selection: { kind: 'commits', shas: [sha], anchor: sha }, fileSel: [] }
@@ -263,16 +290,22 @@ export const stageAll = (path: string) => run(path, () => api.stageAll(path))
 export const unstageAll = (path: string) => run(path, () => api.unstageAll(path))
 
 export async function discardFiles(path: string, files: FileChange[]): Promise<void> {
-  const what = files.length === 1 ? `"${files[0].path}"` : `${files.length} files`
-  const r = await api.confirm({ title: 'Discard changes', message: `Discard changes to ${what}?`, detail: 'This cannot be undone.', buttons: ['Discard', 'Cancel'], type: 'warning' })
-  if (r !== 0) return
-  await run(path, () => api.discardFiles(path, files))
+  // the original asks in the inline prompt bar, not in a system dialog
+  showPrompt({
+    kind: 'confirm',
+    message: files.length === 1
+      ? `This will permanently discard unstaged changes to "${files[0].path}". Are you sure you want to continue?`
+      : 'This will permanently discard unstaged changes to the selected files. Are you sure you want to continue?',
+    buttons: [{ label: 'Discard Unstaged Changes', style: 'danger', run: () => run(path, () => api.discardFiles(path, files)) }]
+  })
 }
 
 export async function discardAll(path: string): Promise<void> {
-  const r = await api.confirm({ title: 'Discard all changes', message: 'Discard all changes in the working directory?', detail: 'All staged, unstaged and untracked changes will be lost. This cannot be undone.', buttons: ['Discard all', 'Cancel'], type: 'warning' })
-  if (r !== 0) return
-  await run(path, () => api.discardAll(path))
+  showPrompt({
+    kind: 'confirm',
+    message: 'This will discard all staged and unstaged changes, including new untracked files. Are you sure you want to discard all changes?',
+    buttons: [{ label: 'Reset All', style: 'danger', run: () => run(path, () => api.discardAll(path)) }]
+  })
 }
 
 export async function applyHunk(path: string, ctx: FileContext, hunk: number, lines: number[] | null, action: 'stage' | 'unstage' | 'discard' | 'revert'): Promise<void> {
@@ -283,7 +316,7 @@ export async function applyHunk(path: string, ctx: FileContext, hunk: number, li
   await run(path, () => api.applyHunk(path, ctx, hunk, lines, action), action === 'revert' ? { success: 'Hunk reverted in the working directory', errorTitle: 'Could not revert the hunk' } : {})
 }
 
-export async function commit(path: string, opts: { noVerify?: boolean; sign?: boolean } = {}): Promise<void> {
+export async function commit(path: string, opts: { noVerify?: boolean; sign?: boolean; push?: boolean } = {}): Promise<void> {
   const v = repoView(path)
   const { summary, description, amend } = v.wip
   if (!summary.trim()) return
@@ -295,20 +328,25 @@ export async function commit(path: string, opts: { noVerify?: boolean; sign?: bo
     return
   }
   const set = getState().settings!
-  const ok = await run(path, async () => { await api.commit(path, message, amend, { ...opts, keepComments: !set.stripComments }); return true }, { errorTitle: 'Commit failed' })
+  const ok = await run(path, async () => { await api.commit(path, message, amend, { noVerify: opts.noVerify, sign: opts.sign, keepComments: !set.stripComments }); return true }, { errorTitle: 'Commit failed' })
   if (ok) {
     updateRepo(path, { wip: { summary: '', description: '', amend: false } })
-    // "Push after each commit" (only when the branch already tracks a remote, so it never prompts)
-    if (set.pushAfterCommit && !amend && snap(path).refs.some((r) => r.isCurrent && r.upstream)) await push(path)
+    // "Push after committing" (the commit options checkbox, defaulting to the preference)
+    if ((opts.push ?? set.pushAfterCommit) && !amend) await push(path)
   }
 }
 
 export async function setAmend(path: string, amend: boolean): Promise<void> {
+  // like the original: amending loads the previous message, and turning it off brings back what was typed
   if (amend) {
+    const draft = { summary: repoView(path).wip.summary, description: repoView(path).wip.description }
     const msg = await api.lastCommitMessage(path)
     const [summary, ...rest] = msg.split('\n')
-    updateRepo(path, { wip: { summary, description: rest.join('\n').trim(), amend: true } })
-  } else updateRepo(path, { wip: { summary: '', description: '', amend: false } })
+    updateRepo(path, { wip: { summary, description: rest.join('\n').trim(), amend: true, draft } })
+  } else {
+    const d = repoView(path).wip.draft
+    updateRepo(path, { wip: { summary: d?.summary ?? '', description: d?.description ?? '', amend: false } })
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -343,26 +381,35 @@ export function localForRemote(path: string, remoteShort: string): Ref | undefin
 
 export async function checkoutRef(path: string, ref: Ref): Promise<void> {
   if (ref.type === 'head' && ref.isCurrent) return
-  const doIt = () => ref.type === 'head' ? api.checkout(path, ref.short)
-    : ref.type === 'remote' ? api.checkoutRemote(path, ref.short, !!localForRemote(path, ref.short)).then(() => undefined)
-      : api.checkout(path, ref.sha)
-  // like the original: the left panel shows "Checking out branch" and the toolbar is disabled until it is done
+  if (ref.type === 'remote') {
+    // like the original: a local branch of that name at another commit asks what to do
+    const local = localForRemote(path, ref.short)
+    if (local && local.sha !== ref.sha) {
+      showPrompt({
+        kind: 'input', message: `A local '${local.short}' already exists.`, placeholder: 'branch name', submitLabel: 'Create Branch Here', large: false, requireValue: true,
+        extraButtons: [{ label: 'Reset Local to Here', run: () => doCheckout(path, ref.short, () => api.checkoutRemote(path, ref.short, true, { reset: true })) }],
+        onSubmit: (name) => doCheckout(path, name.trim(), () => api.checkoutRemote(path, ref.short, false, { newName: name.trim() }))
+      })
+      return
+    }
+    await doCheckout(path, local?.short ?? ref.short.split('/').slice(1).join('/'), () => api.checkoutRemote(path, ref.short, !!local))
+    return
+  }
+  await doCheckout(path, ref.type === 'head' ? ref.short : ref.sha, () => api.checkout(path, ref.type === 'head' ? ref.short : ref.sha), ref.type === 'tag' ? ref.short : undefined)
+}
+
+/** runs a checkout with the original's feedback: "Checking out branch" over the left panel, then a toast */
+async function doCheckout(path: string, target: string, fn: () => Promise<unknown>, tag?: string): Promise<void> {
   updateRepo(path, { busy: CHECKING_OUT })
   try {
-    await doIt()
+    const r = await fn()
     await refresh(path)
+    const branch = snap(path)?.head.branch
+    ok('Checkout Successful', tag ? `Checked out the commit referenced by ${tag}` : branch ? `refs/heads/${branch}` : snap(path)?.head.sha ?? target)
+    if (r === 'kept') autoStashNotice('kept')
   } catch (e) {
-    const msg = errMsg(e)
-    if (/would be overwritten by checkout|commit your changes or stash them/i.test(msg)) {
-      const r = await api.confirm({ title: 'Local changes', message: `Your local changes would be overwritten by checking out ${ref.short}.`, detail: 'Stash your changes and checkout? The stash will be kept so you can pop it later.', buttons: ['Stash & Checkout', 'Cancel'], type: 'warning' })
-      if (r === 0) {
-        const ok = await run(path, async () => { await api.stashSave(path, `WIP before checkout of ${ref.short}`); await doIt(); return true }, { errorTitle: `Could not checkout ${ref.short}` })
-        if (ok) toast({ kind: 'info', title: 'Changes stashed', message: 'Use Pop to restore them.' })
-      }
-    } else {
-      toast({ kind: 'error', title: `Could not checkout ${ref.short}`, message: msg })
-      await refresh(path)
-    }
+    toast({ kind: 'error', title: `Could not checkout ${target}`, message: errMsg(e) })
+    await refresh(path)
   } finally {
     if (repoView(path)?.busy === CHECKING_OUT) updateRepo(path, { busy: null })
   }
@@ -372,7 +419,7 @@ export async function checkoutRef(path: string, ref: Ref): Promise<void> {
 export const CHECKING_OUT = 'Checking out branch'
 export const DELETING = 'Deleting...'
 
-export const checkoutCommit = (path: string, sha: string) => run(path, () => api.checkout(path, sha), { busy: CHECKING_OUT, errorTitle: 'Checkout failed' })
+export const checkoutCommit = (path: string, sha: string) => doCheckout(path, sha, () => api.checkout(path, sha))
 
 export function startCreateRef(path: string, kind: 'branch' | 'tag' | 'annotated-tag', sha?: string): void {
   const s = snap(path)
@@ -386,43 +433,41 @@ export async function submitNewRef(path: string, name: string): Promise<void> {
   updateRepo(path, { newRef: null })
   const n = name.trim()
   if (!nr || !n) return
-  if (nr.kind === 'branch') await run(path, () => api.createBranch(path, n, nr.sha, true), { errorTitle: 'Could not create branch' })
+  if (nr.kind === 'branch') await run(path, () => api.createBranch(path, n, nr.sha, true), { errorTitle: 'Could not create branch', success: 'Checkout Successful', successMessage: `refs/heads/${n}` })
   else if (nr.kind === 'annotated-tag') {
     showPrompt({
       kind: 'input', message: 'Message:', placeholder: 'Annotation message',
-      onSubmit: (msg) => run(path, () => api.createTag(path, n, nr.sha, msg.trim() || n), { errorTitle: 'Could not create tag' })
+      onSubmit: (msg) => run(path, () => api.createTag(path, n, nr.sha, msg.trim() || n), { errorTitle: 'Could not create tag', success: 'Annotated Successfully', successMessage: `refs/tags/${n}` })
     })
-  } else await run(path, () => api.createTag(path, n, nr.sha), { errorTitle: 'Could not create tag' })
+  } else await run(path, () => api.createTag(path, n, nr.sha), { errorTitle: 'Could not create tag', success: 'Created Successfully', successMessage: `refs/tags/${n}` })
 }
 
 export async function deleteLocalBranch(path: string, ref: Ref): Promise<void> {
-  // like the original: deletes right away (Undo restores it); only unmerged work asks first
-  try {
-    updateRepo(path, { busy: DELETING })
-    try { await api.deleteBranch(path, ref.short, false) } finally { updateRepo(path, { busy: null }) }
-    await refresh(path)
-  } catch (e) {
-    const msg = errMsg(e)
-    if (/not fully merged/.test(msg)) {
-      showPrompt({
-        kind: 'confirm', message: `'${ref.short}' is not fully merged. Delete it anyway?`,
-        buttons: [{ label: 'Delete', style: 'danger', run: () => run(path, () => api.deleteBranch(path, ref.short, true), { busy: DELETING }) }]
-      })
-    } else toast({ kind: 'error', title: 'Could not delete branch', message: msg })
-  }
+  // like the original: always confirms (merged or not), then deletes (Undo restores it)
+  confirmDestructive(`This is a destructive operation, are you sure you want to delete "${ref.short}"?`, 'Delete', () =>
+    run(path, () => api.deleteBranch(path, ref.short, true), { busy: DELETING, errorTitle: `Delete Failed: refs/heads/${ref.short}`, success: `Deleted: refs/heads/${ref.short}` }))
 }
 
 export async function deleteRemoteBranch(path: string, ref: Ref): Promise<void> {
-  const r = await api.confirm({ title: 'Delete remote branch', message: `Delete "${ref.short}" from the remote?`, detail: 'This deletes the branch on the server for everyone.', buttons: ['Delete', 'Cancel'], type: 'warning' })
-  if (r !== 0) return
-  const branch = ref.short.slice(ref.remote!.length + 1)
-  await run(path, () => api.deleteRemoteBranch(path, ref.remote!, branch), { busy: 'Deleting', success: `Deleted ${ref.short}` })
+  confirmDestructive(`This is a destructive operation, are you sure you want to delete "${ref.short}"?`, 'Delete', () => removeRemoteBranch(path, ref))
+}
+
+const removeRemoteBranch = (path: string, ref: Ref, refresh = true) =>
+  run(path, () => api.deleteRemoteBranch(path, ref.remote!, ref.short.slice(ref.remote!.length + 1)), { busy: 'Deleting', errorTitle: `Delete Failed: refs/remotes/${ref.short}`, success: `Deleted: refs/remotes/${ref.short}`, refresh })
+
+/** "Delete X and origin/X" / "Delete all "X" branches (local && remote)": one confirmation, one result per ref */
+export function deleteBranchEverywhere(path: string, local: Ref, remotes: Ref[]): void {
+  confirmDestructive(`This is a destructive operation, are you sure you want to delete "${local.short}" at this node, including remotes?`, 'Delete', async () => {
+    await run(path, () => api.deleteBranch(path, local.short, true), { busy: DELETING, errorTitle: `Delete Failed: refs/heads/${local.short}`, success: `Deleted: refs/heads/${local.short}`, refresh: false })
+    for (const r of remotes) await removeRemoteBranch(path, r, false)
+    await refresh(path)
+  })
 }
 
 export function renameBranch(path: string, ref: Ref): void {
   showPrompt({
     kind: 'input', message: `Rename '${ref.short}' to:`, value: ref.short, placeholder: 'new branch name',
-    onSubmit: (v) => { const n = v.trim(); if (n && n !== ref.short) return run(path, () => api.renameBranch(path, ref.short, n), { errorTitle: 'Could not rename branch' }) }
+    onSubmit: (v) => { const n = v.trim(); if (n && n !== ref.short) return run(path, () => api.renameBranch(path, ref.short, n), { errorTitle: 'Could not rename branch', success: 'Rename Successful', successMessage: `${ref.short} to ${n}` }) }
   })
 }
 
@@ -443,9 +488,9 @@ export function setUpstreamDialog(path: string, ref: Ref, thenPush = false): voi
   })
 }
 
-export const mergeInto = (path: string, src: string) => runOp(path, () => api.merge(path, src), 'Merge', 'Merging')
-export const rebaseOnto = (path: string, onto: string) => runOp(path, () => api.rebase(path, onto), 'Rebase', 'Rebasing')
-export const fastForward = (path: string, branch: Ref, to: string) => run(path, () => api.fastForward(path, branch.short, to, !!branch.isCurrent), { errorTitle: 'Fast-forward failed' })
+export const mergeInto = (path: string, src: string) => runOp(path, () => api.merge(path, src), 'Merge', 'Merging', { title: 'Merged', message: `${src} into ${currentBranch(path) ?? 'HEAD'}` })
+export const rebaseOnto = (path: string, onto: string) => runOp(path, () => api.rebase(path, onto), 'Rebase', 'Rebasing', { title: 'Rebase Successful' })
+export const fastForward = (path: string, branch: Ref, to: string) => run(path, () => api.fastForward(path, branch.short, to, !!branch.isCurrent), { errorTitle: 'Fast-forward failed', success: 'Merged', successMessage: `${to} into ${branch.short}` })
 
 // ---------------------------------------------------------------------------------------------
 // commits
@@ -455,24 +500,43 @@ export function orderOldestFirst(path: string, shas: string[]): string[] {
   return [...shas].sort((a, b) => order.indexOf(b) - order.indexOf(a))
 }
 
-export const cherryPick = (path: string, shas: string[]) => runOp(path, () => api.cherryPick(path, orderOldestFirst(path, shas)), 'Cherry pick', 'Cherry picking')
-export const revertCommit = (path: string, c: Commit) => runOp(path, () => api.revert(path, c.sha, c.parents.length > 1), 'Revert', 'Reverting')
+/** the original asks whether the picked / reverted changes should be committed right away ("No" leaves them staged) */
+function askCommitNow(message: string, go: (noCommit: boolean) => unknown): void {
+  showPrompt({ kind: 'confirm', message, buttons: [{ label: 'Yes', style: 'success', run: () => go(false) }, { label: 'No', run: () => go(true) }] })
+}
+export const cherryPick = (path: string, shas: string[]) => askCommitNow('Do you want to immediately commit the cherry picked changes?', (noCommit) =>
+  runOp(path, () => api.cherryPick(path, orderOldestFirst(path, shas), noCommit), 'Cherry pick', 'Cherry picking', { title: 'Cherry pick Successful' }))
+export const revertCommit = (path: string, c: Commit) => askCommitNow('Do you want to immediately commit the reverted changes?', (noCommit) =>
+  runOp(path, () => api.revert(path, c.sha, c.parents.length > 1, noCommit), 'Revert', 'Reverting', { title: 'Revert Successful' }))
 
 export async function resetTo(path: string, sha: string, mode: ResetMode): Promise<void> {
-  if (mode === 'hard') {
-    const r = await api.confirm({ title: 'Hard reset', message: `Reset ${currentBranch(path) ?? 'HEAD'} to ${sha.slice(0, 7)} and discard all changes?`, detail: 'Uncommitted changes will be lost.', buttons: ['Reset', 'Cancel'], type: 'warning' })
-    if (r !== 0) return
-  }
-  await runOp(path, () => api.reset(path, sha, mode), 'Reset')
+  const go = () => runOp(path, () => api.reset(path, sha, mode), 'Reset')
+  // the original resets without asking; uncommitted work that a hard reset would throw away still gets a confirmation here
+  const s = snap(path)
+  const tracked = [...s.status.staged, ...s.status.unstaged].some((f) => f.status !== '?')
+  if (mode === 'hard' && tracked) confirmDestructive('This will discard all staged and unstaged changes. Are you sure you want to reset?', 'Reset', go)
+  else await go()
 }
 
 /** Commits from HEAD (newest first) down to, but excluding, base. Follows first parents. */
 export function commitsSince(path: string, base: string | null): Commit[] | null {
   const s = snap(path)
   const byId = new Map(s.commits.map((c) => [c.sha, c]))
+  // everything the base can reach is already "below" it
+  const reach = new Set<string>()
+  if (base) {
+    const stack = [base]
+    while (stack.length) {
+      const x = stack.pop()!
+      if (reach.has(x)) continue
+      reach.add(x)
+      const c = byId.get(x)
+      if (c) stack.push(...c.parents)
+    }
+  }
   const out: Commit[] = []
   let cur = byId.get(s.head.sha)
-  while (cur && cur.sha !== base) {
+  while (cur && !reach.has(cur.sha)) {
     out.push(cur)
     if (!cur.parents.length) break
     cur = byId.get(cur.parents[0])
@@ -481,16 +545,47 @@ export function commitsSince(path: string, base: string | null): Commit[] | null
   return out
 }
 
-export function startInteractiveRebase(path: string, base: string | null, preset?: Partial<Record<string, RebaseTodoItem['action']>>): void {
+/** "Move commit up / down": swaps a commit with its child / parent by an interactive rebase */
+export async function moveCommit(path: string, sha: string, dir: 'up' | 'down'): Promise<void> {
+  const list = commitsSince(path, null) ?? []
+  const i = list.findIndex((c) => c.sha === sha)
+  const j = dir === 'up' ? i - 1 : i + 1
+  if (i < 0 || j < 0 || j >= list.length) return
+  const oldest = Math.max(i, j)
+  const items: RebaseTodoItem[] = list.slice(0, oldest + 1).map((c) => ({ action: 'pick', sha: c.sha, summary: c.summary }))
+  ;[items[i], items[j]] = [items[j], items[i]]
+  await runInteractiveRebase(path, list[oldest].parents[0] ?? null, items)
+}
+
+/** the commits git rebases onto base: everything HEAD has that base doesn't, merge commits left out (git
+ *  linearizes them), newest first in graph order */
+export function rebaseRange(path: string, base: string | null): Commit[] {
   const s = snap(path)
-  if (s.status.staged.length + s.status.unstaged.length > 0) {
-    toast({ kind: 'info', title: 'Working directory has changes', message: 'Your changes will be stashed automatically during the rebase.' })
+  const byId = new Map(s.commits.map((c) => [c.sha, c]))
+  const reach = (start: string | null): Set<string> => {
+    const seen = new Set<string>()
+    const stack = start ? [start] : []
+    while (stack.length) {
+      const x = stack.pop()!
+      if (seen.has(x)) continue
+      seen.add(x)
+      const c = byId.get(x)
+      if (c) stack.push(...c.parents)
+    }
+    return seen
   }
-  const list = commitsSince(path, base)
-  if (!list || !list.length) { toast({ kind: 'error', title: 'Nothing to rebase', message: 'Select a commit that is an ancestor of HEAD.' }); return }
-  if (list.some((c) => c.parents.length > 1)) toast({ kind: 'info', title: 'Merge commits in range', message: 'Merge commits will be flattened by the interactive rebase.' })
+  const fromBase = reach(base)
+  const fromHead = reach(s.head.sha)
+  return s.commits.filter((c) => fromHead.has(c.sha) && !fromBase.has(c.sha) && c.parents.length < 2)
+}
+
+export function startInteractiveRebase(path: string, base: string | null, preset?: Partial<Record<string, RebaseTodoItem['action']>>, ontoLabel?: string): void {
+  const s = snap(path)
+  // local changes are stashed by git (--autostash) during the rebase, silently like the original
+  const list = rebaseRange(path, base)
+  if (!list.length) { toast({ kind: 'error', title: 'Nothing to rebase', message: `${s.head.branch ?? 'HEAD'} has no commits that are not already in the target.` }); return }
   const items: RebaseTodoItem[] = list.map((c) => ({ action: preset?.[c.sha] ?? 'pick', sha: c.sha, summary: c.summary, message: c.body ? `${c.summary}\n\n${c.body}` : c.summary }))
-  updateRepo(path, { center: { kind: 'rebase', base, branch: s.head.branch ?? 'HEAD', items } })
+  updateRepo(path, { center: { kind: 'rebase', base, branch: s.head.branch ?? 'HEAD', items, onto: ontoLabel ?? base?.slice(0, 7) ?? 'root' } })
 }
 
 export async function runInteractiveRebase(path: string, base: string | null, itemsNewestFirst: RebaseTodoItem[]): Promise<void> {
@@ -557,60 +652,107 @@ export async function dropCommits(path: string, shas: string[]): Promise<void> {
 // tags
 
 export async function deleteTag(path: string, ref: Ref): Promise<void> {
-  const r = await api.confirm({ title: 'Delete tag', message: `Delete tag "${ref.short}" locally?`, buttons: ['Delete', 'Cancel'], type: 'warning' })
-  if (r === 0) await run(path, () => api.deleteTag(path, ref.short))
+  confirmDestructive(`This is a destructive operation, are you sure you want to delete "${ref.short}"?`, 'Delete', async () => {
+    const known = remoteTagsOf(path)
+    const done = await run(path, () => api.deleteTag(path, ref.short).then(() => true), { errorTitle: 'Could not delete tag', success: `Deleted: refs/tags/${ref.short}` })
+    if (!done) return
+    // like the original: offer to delete it from the remotes that still have it
+    const on = Object.entries(await Promise.race([known, new Promise<Record<string, string[] | null>>((ok) => setTimeout(() => ok({}), 4000))])).filter(([, tags]) => tags?.includes(ref.short)).map(([r]) => r)
+    if (on.length) showPrompt({
+      kind: 'confirm', message: `The tag was deleted locally. Would you also like to delete tags named "${ref.short}" from your remote repos?`,
+      buttons: [{ label: 'Delete all', style: 'danger', run: () => removeTagFromRemotes(path, ref, on) }]
+    })
+  })
 }
-export const deleteRemoteTag = (path: string, remote: string, ref: Ref) => run(path, () => api.deleteRemoteTag(path, remote, ref.short), { busy: 'Deleting', success: `Deleted ${ref.short} from ${remote}` })
-export const pushTag = (path: string, remote: string, ref: Ref) => run(path, () => api.pushTag(path, remote, ref.short), { busy: 'Pushing', success: `Pushed ${ref.short} to ${remote}` })
+async function removeTagFromRemotes(path: string, ref: Ref, remotes: string[]): Promise<void> {
+  for (const r of remotes) await run(path, () => api.deleteRemoteTag(path, r, ref.short), { busy: 'Deleting', errorTitle: `Delete Failed: ${ref.short} from ${r}`, success: `Deleted: ${ref.short} from ${r}`, refresh: false })
+  forgetRemoteTags(path)
+  await refresh(path)
+}
+export const deleteRemoteTag = (path: string, remote: string, ref: Ref) => confirmDestructive(`This is a destructive operation, are you sure you want to delete "${ref.short}" from "${remote}"?`, 'Delete', () => removeTagFromRemotes(path, ref, [remote]))
+export const deleteTagFromAllRemotes = (path: string, ref: Ref, remotes: string[]) => confirmDestructive(`This is a destructive operation, are you sure you want to delete "${ref.short}" from your remote repos?`, 'Delete', () => removeTagFromRemotes(path, ref, remotes))
+export const pushTag = async (path: string, remote: string, ref: Ref) => {
+  await run(path, () => api.pushTag(path, remote, ref.short), { busy: 'Pushing', errorTitle: 'Push failed', success: 'Pushed Successfully', successMessage: `${ref.short} to ${remote}` })
+  forgetRemoteTags(path)
+}
+export const pushTagToAll = async (path: string, ref: Ref, remotes: string[]) => {
+  for (const r of remotes) await run(path, () => api.pushTag(path, r, ref.short), { busy: 'Pushing', errorTitle: 'Push failed', success: 'Pushed Successfully', successMessage: `${ref.short} to ${r}`, refresh: false })
+  forgetRemoteTags(path)
+  await refresh(path)
+}
+/** "Fast-forward v1 to main" / "Merge main into v1" on a tag: the original moves the tag (keeping its annotation) */
+export const moveTag = (path: string, ref: Ref, to: string) => run(path, () => api.moveTag(path, ref.short, to), { errorTitle: 'Could not move tag' })
+
+// which tags each remote has, used by the tag menu (push only where missing, delete only where present)
+const remoteTagCache = new Map<string, { at: number; p: Promise<Record<string, string[] | null>> }>()
+export function remoteTagsOf(path: string): Promise<Record<string, string[] | null>> {
+  const c = remoteTagCache.get(path)
+  if (c && Date.now() - c.at < 5 * 60_000) return c.p
+  const p = api.remoteTags(path).catch(() => ({}))
+  remoteTagCache.set(path, { at: Date.now(), p })
+  return p
+}
+export const forgetRemoteTags = (path: string) => { remoteTagCache.delete(path) }
 
 // ---------------------------------------------------------------------------------------------
 // stash
 
 export async function stashSave(path: string, message?: string, mode: 'all' | 'staged' | 'keep-index' = 'all'): Promise<void> {
   const v = repoView(path)
-  const msg = message?.trim() || v.wip.summary.trim() || undefined
+  const msg = message?.trim() || [v.wip.summary.trim(), v.wip.description.trim()].filter(Boolean).join(' ') || undefined
   await run(path, () => api.stashSave(path, msg, mode), { busy: 'Stashing', errorTitle: 'Stash failed' })
   updateRepo(path, { wip: { summary: '', description: '', amend: false } })
 }
 export async function stashPop(path: string, index = 0): Promise<void> { await runOp(path, () => api.stashPop(path, index), 'Pop stash', 'Popping stash') }
 export async function stashApply(path: string, index: number): Promise<void> { await runOp(path, () => api.stashApply(path, index), 'Apply stash', 'Applying stash') }
 export async function stashDrop(path: string, st: Stash): Promise<void> {
-  const r = await api.confirm({ title: 'Delete stash', message: `Delete stash@{${st.index}}?`, detail: st.message, buttons: ['Delete', 'Cancel'], type: 'warning' })
-  if (r === 0) await run(path, () => api.stashDrop(path, st.index))
+  confirmDestructive(`This is a destructive operation, are you sure you want to delete stash with message "${st.message}"?`, 'Delete', () =>
+    run(path, () => api.stashDrop(path, st.index), { errorTitle: 'Could not delete stash' }))
 }
 
 // ---------------------------------------------------------------------------------------------
 // worktrees
 
-export function addWorktreeDialog(path: string, opts: { branch?: string; commit?: string } = {}): void {
-  const parent = path.replace(/[\\/][^\\/]+$/, '')
-  const base = basename(path)
-  const suggested = `${parent}\\${base}-${(opts.branch ?? opts.commit?.slice(0, 7) ?? 'worktree').replace(/[\\/]/g, '-')}`
-  openModal('worktree', { path, branch: opts.branch, commit: opts.commit, dir: suggested })
+/** opens the Create Worktree panel; ref = full ref name (refs/heads/x, refs/remotes/o/x) or a sha */
+export function addWorktreeDialog(path: string, opts: { ref?: string } = {}): void {
+  updateRepo(path, { slidey: { kind: 'worktree', ref: opts.ref ?? '' } })
 }
 
-export async function removeWorktree(path: string, wt: Worktree): Promise<void> {
-  const r = await api.confirm({ title: 'Remove worktree', message: `Remove worktree at ${wt.path}?`, detail: 'The folder will be deleted. The branch is kept.', buttons: ['Remove', 'Cancel'], type: 'warning' })
-  if (r !== 0) return
-  try {
-    await api.removeWorktree(path, wt.path, false)
-  } catch (e) {
-    const f = await api.confirm({ title: 'Worktree has changes', message: errMsg(e), detail: 'Force removal? Uncommitted changes in the worktree will be lost.', buttons: ['Force remove', 'Cancel'], type: 'warning' })
-    if (f === 0) await run(path, () => api.removeWorktree(path, wt.path, true))
+export async function removeWorktree(path: string, wt: Worktree, deleteBranch = false): Promise<void> {
+  const branch = wt.branch?.replace(/^refs\/heads\//, '')
+  const after = async () => {
+    if (deleteBranch && branch) await run(path, () => api.deleteBranch(path, branch, true), { errorTitle: 'Could not delete branch' })
+    else await refresh(path)
   }
-  await refresh(path)
+  // like the original: git refuses to remove a worktree with changes, and only then is force offered
+  const go = async () => {
+    try {
+      await api.removeWorktree(path, wt.path, false)
+      await after()
+    } catch {
+      confirmDestructive('Removing this worktree requires force, which is destructive and cannot be undone. Do you want to complete the removal?', 'Force Remove Worktree', async () => {
+        const done = await run(path, async () => { await api.removeWorktree(path, wt.path, true); return true }, { errorTitle: 'Could not remove worktree' })
+        if (done) await after()
+      })
+    }
+  }
+  if (deleteBranch && branch) confirmDestructive(`This will permanently remove the worktree at '${wt.path}' and delete the local branch '${branch}'. This action cannot be undone.`, 'Remove and Delete', go)
+  else await go()
 }
 
 // ---------------------------------------------------------------------------------------------
 // network
 
 export async function fetchAll(path: string, quiet = false): Promise<void> {
+  forgetRemoteTags(path)
   if (quiet) {
     try { await api.fetchAll(path, true) } catch { /* silent */ }
     await refresh(path)
+    void remoteTagsOf(path) // ready for the tag menu
     return
   }
   await run(path, () => api.fetchAll(path), { busy: 'Fetching', errorTitle: 'Fetch failed' })
+  void remoteTagsOf(path)
 }
 
 export async function pull(path: string, mode?: PullMode): Promise<void> {
@@ -621,7 +763,10 @@ export async function pull(path: string, mode?: PullMode): Promise<void> {
   const local = s.refs.find((r) => r.type === 'head' && r.isCurrent)
   if (!local?.upstream) { toast({ kind: 'error', title: 'No upstream', message: `${s.head.branch} does not track a remote branch. Push it first or set an upstream.` }); return }
   const res = await runOp(path, () => api.pull(path, m), 'Pull', 'Pulling')
-  if (res?.ok) toast({ kind: 'success', title: 'Pull complete' }, 2500)
+  if (!res?.ok || res.conflicts) return
+  // like the original: say so when there was nothing to bring in, then confirm the pull
+  if (res.upToDate) toast({ kind: 'info', title: 'Already Up-to-Date', message: `No merge necessary. Branch ${local.upstream.replace(/^refs\/remotes\//, '')} was not moved.` }, 5000)
+  ok('Pulled Successfully')
 }
 
 export function remoteOf(path: string, fullRemoteRef: string): { remote: string; branch: string } {
@@ -646,15 +791,28 @@ export async function push(path: string, branchName?: string, force = false): Pr
   await doPush(path, { remote, branch: name, remoteBranch: branch, force })
 }
 
-export async function doPush(path: string, opts: { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean }): Promise<void> {
+type PushOpts = { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean; noLease?: boolean }
+export async function doPush(path: string, opts: PushOpts): Promise<void> {
   const res = await run(path, () => api.push(path, opts), { busy: 'Pushing' })
   if (!res) return
-  if (res.ok) { toast({ kind: 'success', title: `Pushed ${opts.branch} to ${opts.remote}` }, 2500); return }
-  if (res.error === 'rejected' && !opts.force) {
+  if (res.ok) { ok('Pushed Successfully', `${opts.branch} to ${opts.remote}`); return }
+  // the remote branch moved since the last fetch (rejected while not known to be behind, or the lease failed)
+  const remoteChanged = () =>
     showPrompt({
-      kind: 'confirm', message: `'${opts.branch}' is behind '${opts.remote}/${opts.remoteBranch ?? opts.branch}'. Update your branch by doing a Pull.`,
+      kind: 'confirm', message: `WARNING! 'refs/heads/${opts.branch}' has changed on the remote since the last fetch.`,
       buttons: [
-        { label: 'Pull', style: 'success', run: () => pull(path) },
+        { label: 'Fetch', style: 'success', run: () => fetchAll(path) },
+        { label: 'Force Push Anyway', style: 'danger', run: () => showPrompt({ kind: 'confirm', message: 'Force push is a destructive action and cannot be undone. Are you sure?', buttons: [{ label: 'Force Push', style: 'danger', run: () => doPush(path, { ...opts, force: true, noLease: true }) }] }) }
+      ]
+    })
+  if (res.error === 'stale') { remoteChanged(); return }
+  if (res.error === 'rejected' && !opts.force) {
+    // like the original: "behind" only when the branch is known to be behind its upstream
+    if (!snap(path).refs.find((r) => r.type === 'head' && r.short === opts.branch)?.behind) { remoteChanged(); return }
+    showPrompt({
+      kind: 'confirm', message: `'refs/heads/${opts.branch}' is behind 'refs/remotes/${opts.remote}/${opts.remoteBranch ?? opts.branch}'. Update your branch by doing a Pull.`,
+      buttons: [
+        { label: getState().settings?.defaultPullMode === 'ff-only' ? 'Pull (fast-forward only)' : getState().settings?.defaultPullMode === 'rebase' ? 'Pull (rebase)' : 'Pull (fast-forward if possible)', style: 'success', run: () => pull(path) },
         { label: 'Force Push', style: 'danger', run: () => confirmForcePush(path, opts) }
       ]
     })
@@ -663,10 +821,12 @@ export async function doPush(path: string, opts: { remote: string; branch: strin
   toast({ kind: 'error', title: 'Push failed', message: res.error })
 }
 
-export function confirmForcePush(path: string, opts: { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean }): void {
+export function confirmForcePush(path: string, opts: PushOpts): void {
+  if (getState().settings?.forcePushSkipSecondWarning) { void doPush(path, { ...opts, force: true }); return }
   showPrompt({
     kind: 'confirm', message: 'Force push is a destructive action and cannot be undone. Are you sure?',
-    buttons: [{ label: 'Force Push', style: 'danger', run: () => doPush(path, { ...opts, force: true }) }]
+    buttons: [{ label: 'Force Push', style: 'danger', run: () => doPush(path, { ...opts, force: true }) }],
+    dontAskAgain: (v) => { if (v) { setState((s) => ({ settings: s.settings ? { ...s.settings, forcePushSkipSecondWarning: true } : s.settings })); void api.setSettings({ forcePushSkipSecondWarning: true }) } }
   })
 }
 
@@ -690,14 +850,24 @@ function startAutoFetch(): void {
 // ---------------------------------------------------------------------------------------------
 // undo / redo
 
-export async function undo(path: string): Promise<void> {
-  const label = await run(path, () => api.undo(path), { errorTitle: 'Undo failed' })
-  if (label) toast({ kind: 'info', title: `Undid ${label}` }, 2000)
+// like the original: the last action comes from the reflog; a reset or rebase over local changes asks to stash first
+async function undoOrRedo(path: string, which: 'undo' | 'redo'): Promise<void> {
+  const state = (await api.undoState(path).catch(() => null))?.[which]
+  const go = async (stash: boolean) => {
+    const label = await run(path, () => (which === 'undo' ? api.undo(path, { stash }) : api.redo(path, { stash })), { errorTitle: which === 'undo' ? 'Undo Failed' : 'Redo Failed' })
+    if (label) ok(which === 'undo' ? 'Undo Successful' : 'Redo Successful', label)
+  }
+  if (state?.needsStash) {
+    showPrompt({
+      kind: 'confirm', message: `To undo/redo the last reset, you must stash any changes in branch "${state.needsStash}". Do you want to do this now?`,
+      buttons: [{ label: 'Stash Changes', style: 'danger', run: () => go(true) }]
+    })
+    return
+  }
+  await go(false)
 }
-export async function redo(path: string): Promise<void> {
-  const label = await run(path, () => api.redo(path), { errorTitle: 'Redo failed' })
-  if (label) toast({ kind: 'info', title: `Redid ${label}` }, 2000)
-}
+export const undo = (path: string) => undoOrRedo(path, 'undo')
+export const redo = (path: string) => undoOrRedo(path, 'redo')
 
 // ---------------------------------------------------------------------------------------------
 // native context menus

@@ -1,7 +1,7 @@
 // Additional actions: visibility, compare, patches, gitflow, submodules, tabs, terminal, external tools.
 import { api } from './lib/api'
-import { getState, setState, updateRepo, toast, openModal, showPrompt } from './store'
-import { run, runOp, snap, repoView, orderOldestFirst, openRepo, persistTabs } from './actions'
+import { getState, setState, updateRepo, toast, dismissToast, openModal, showPrompt } from './store'
+import { run, runOp, snap, repoView, orderOldestFirst, openRepo, closeTab, persistTabs } from './actions'
 import { basename } from './lib/format'
 import type { Settings, Stash } from '@shared/types'
 
@@ -178,6 +178,10 @@ export async function externalMergeTool(path: string, file: string): Promise<voi
 export async function switchProfile(id: string): Promise<void> {
   saveSettings({ activeProfile: id })
   const p = getState().settings!.profiles.find((x) => x.id === id)
+  // "Keep my .gitconfig updated with my profile"
+  if (p && getState().settings!.syncGitConfigWithProfile && p.gitName && p.gitEmail) {
+    try { await api.gitConfigSet('user.name', p.gitName); await api.gitConfigSet('user.email', p.gitEmail) } catch { /* the toast below still reports the switch */ }
+  }
   toast({ kind: 'info', title: `Switched to ${p?.name ?? 'profile'}`, message: p?.gitEmail ? `Commits will be authored as ${p.gitName} <${p.gitEmail}>` : 'Using your git config identity' }, 2500)
 }
 
@@ -212,4 +216,31 @@ export async function importFromGitKraken(): Promise<void> {
     title: `Imported ${repos.length} ${repos.length === 1 ? 'repository' : 'repositories'} from GitKraken`,
     message: [`${added} new ${added === 1 ? 'tab' : 'tabs'}`, branches ? `${branches} hidden branches` : '', stashes ? `${stashes} hidden stashes` : '', missing ? `${missing} skipped (folder not found)` : ''].filter(Boolean).join(' · ')
   })
+}
+
+/** Repository management: fetch / pull every open repository, one after the other, with one summary at the end. */
+export async function fetchAllRepos(paths: string[]): Promise<void> {
+  const failed: string[] = []
+  const id = toast({ kind: 'progress', title: `Fetching ${paths.length} repositories…` }, 0)
+  for (const p of paths) { try { await api.fetchAll(p, true) } catch { failed.push(basename(p)) } }
+  dismissToast(id)
+  toast(failed.length ? { kind: 'error', title: `Fetched ${paths.length - failed.length} of ${paths.length} repositories`, message: `Failed: ${failed.join(', ')}` } : { kind: 'success', title: `Fetched ${paths.length} repositories` })
+}
+
+export async function pullAllRepos(paths: string[]): Promise<void> {
+  const failed: string[] = []
+  const id = toast({ kind: 'progress', title: `Pulling ${paths.length} repositories…` }, 0)
+  const mode = getState().settings?.defaultPullMode
+  for (const p of paths) {
+    try { const r = await api.pull(p, !mode || mode === 'fetch' ? 'ff' : mode); if (!r.ok) failed.push(basename(p)) } catch { failed.push(basename(p)) }
+  }
+  dismissToast(id)
+  toast(failed.length ? { kind: 'error', title: `Pulled ${paths.length - failed.length} of ${paths.length} repositories`, message: `Failed: ${failed.join(', ')}` } : { kind: 'success', title: `Pulled ${paths.length} repositories` })
+}
+
+/** "Open this worktree": the worktree takes the place of the current tab */
+export async function openInThisTab(current: string, target: string): Promise<void> {
+  const tab = getState().tabs.find((t) => t.path === current)
+  await openRepo(target)
+  if (tab && getState().tabs.some((t) => t.path === target)) await closeTab(tab.id)
 }

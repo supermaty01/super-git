@@ -70,7 +70,7 @@ const READ_SUBCOMMANDS = new Set([
   'log', 'show', 'diff', 'diff-tree', 'diff-files', 'diff-index', 'status', 'for-each-ref', 'rev-parse', 'rev-list',
   'cat-file', 'ls-files', 'ls-tree', 'blame', 'name-rev', 'merge-base', 'describe', 'shortlog', 'grep', 'check-attr',
   'check-ignore', 'check-ref-format', 'var', 'version', '--version', 'verify-commit', 'verify-tag', 'count-objects',
-  'show-ref', 'range-diff', 'format-patch'
+  'show-ref', 'range-diff', 'format-patch', 'ls-remote'
 ])
 
 /** True when a git invocation only reads. Anything not recognised counts as a write. */
@@ -88,6 +88,7 @@ export function isReadOnlyGit(args: string[]): boolean {
       // `git config <key>` reads; `git config <key> <value>` writes (the file after -f / --file is not a key)
       return rest.filter((a, i) => !a.startsWith('-') && !/^(-f|--file|--blob|--type|-t|--default)$/.test(rest[i - 1] ?? '')).length === 1
     case 'worktree': return rest[0] === 'list'
+    case 'sparse-checkout': return rest[0] === 'list'
     case 'stash': return rest[0] === 'list' || rest[0] === 'show'
     case 'remote': return rest.length === 0 || (rest.length === 1 && rest[0] === '-v') || rest[0] === 'get-url'
     case 'symbolic-ref': return words.length <= 1 && !flags.some((f) => f === '-d' || f === '--delete' || f === '-m')
@@ -116,7 +117,13 @@ export function assertWritable(what: string): void {
   throw new GitError(`Read-only mode: ${what} was blocked`, '', -1, [])
 }
 
+/** Activity log: the last git commands SuperGit ran (Help > Support Logs > View Activity Log). */
+export interface ActivityEntry { time: number; repo: string; args: string; ms: number; code: number; error?: string }
+const activity: ActivityEntry[] = []
+export const activityLog = (): ActivityEntry[] => activity.slice().reverse()
+
 export function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
+  const started = Date.now()
   return new Promise((resolve, reject) => {
     if (READ_ONLY && !isReadOnlyGit(args)) {
       logBlocked(`BLOCKED git ${args.join(' ').slice(0, 300)} (in ${opts.cwd})`)
@@ -164,6 +171,14 @@ export function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
     })
     child.on('error', (e: NodeJS.ErrnoException) => reject(e.code === 'ENOENT' ? new GitError('Git was not found. Install Git for Windows (https://git-scm.com) and restart SuperGit.', '', -1, args) : e))
     child.on('close', (code) => {
+      // read-only queries run all the time (status, log, refs…) and would drown the log: keep every command
+      // that can change something, and reads only when they really failed (exit 1 from config / check-ignore /
+      // diff --quiet and a failed rev-parse --verify are answers, not errors)
+      const read = isReadOnlyGit(args)
+      if (!read || ((code ?? 0) > 1 && args[0] !== 'rev-parse')) {
+        activity.push({ time: started, repo: nodePath.basename(opts.cwd), args: args.join(' ').slice(0, 400), ms: Date.now() - started, code: code ?? 0, error: code ? Buffer.concat(err).toString('utf8').trim().split(/\r?\n/).slice(-3).join(' ').slice(0, 300) : undefined })
+        if (activity.length > 500) activity.splice(0, activity.length - 500)
+      }
       const stdoutBuf = Buffer.concat(out)
       const res: RunResult = {
         stdout: opts.binary ? '' : stdoutBuf.toString('utf8'),
@@ -242,8 +257,8 @@ export function parseStashes(stdout: string): Stash[] {
   let i = 0
   for (const rec of stdout.split('\0')) {
     if (!rec.trim()) continue
-    const [sha, parents, date, msg] = rec.replace(/^\n/, '').split(US)
-    out.push({ index: i++, sha, parents: parents ? parents.split(' ') : [], date: Number(date) * 1000, message: msg })
+    const [sha, parents, date, msg, author, email] = rec.replace(/^\n/, '').split(US)
+    out.push({ index: i++, sha, parents: parents ? parents.split(' ') : [], date: Number(date) * 1000, message: msg, ...(author !== undefined ? { author, email: email ?? '' } : {}) })
   }
   return out
 }

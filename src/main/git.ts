@@ -7,7 +7,7 @@ import {
   parseStatus, parseNameStatus, parseDiff, buildPatch, synthesizeAddDiff, parseBlame, isBinary
 } from './gitcore'
 import type {
-  RepoSnapshot, RepoState, FileChange, FileContext, FileContents, ConflictSides, ResetMode, PullMode, RebaseTodoItem,
+  RepoSnapshot, RepoState, FileChange, FileContext, FileContents, ConflictSides, ResetMode, PullMode, RebaseTodoItem, AutoStash,
   OpResult, Commit, BlameLine, HeadInfo, CommitOptions, Submodule, GitflowConfig
 } from '../shared/types'
 
@@ -68,9 +68,19 @@ export async function cloneRepo(url: string, dest: string, opts: { shallow?: boo
   const args = ['clone', '--progress']
   if (opts.shallow) args.push('--depth', '1')
   if (opts.branch) args.push('--branch', opts.branch)
-  if (opts.recurse) args.push('--recurse-submodules')
   args.push(url, dest)
   await net(parent, 'clone', args)
+  // submodules are fetched after the clone itself, so one that cannot be fetched (unreachable URL, a local
+  // path blocked by git's protocol.file.allow safety rule…) never loses the clone; the caller hears about it
+  if (opts.recurse) {
+    const r = await g(dest, ['submodule', 'update', '--init', '--recursive', '--progress'], { allowFail: true })
+    if (r.code !== 0) throw new SubmoduleWarning((r.stderr || r.stdout).trim().split('\n').filter((l) => /fatal|error/i.test(l)).slice(0, 2).join('\n'))
+  }
+}
+
+/** The repository was cloned but some submodules could not be fetched. */
+export class SubmoduleWarning extends Error {
+  constructor(detail: string) { super(`SUBMODULES: ${detail || 'Some submodules could not be fetched.'}`) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -161,7 +171,7 @@ export async function getSnapshot(cwd: string, limit: number): Promise<RepoSnaps
   const [refsOut, commits, stashOut, wtOut, remOut, status, name, email] = await Promise.all([
     out(root, ['for-each-ref', `--format=${REF_FORMAT}`, 'refs/heads', 'refs/remotes', 'refs/tags']),
     getLog(root, limit + 1),
-    g(root, ['stash', 'list', '-z', '--format=%H%x1f%P%x1f%at%x1f%gs'], { allowFail: true }),
+    g(root, ['stash', 'list', '-z', '--format=%H%x1f%P%x1f%at%x1f%gs%x1f%an%x1f%ae'], { allowFail: true }),
     g(root, ['worktree', 'list', '--porcelain'], { allowFail: true }),
     out(root, ['remote', '-v']),
     getStatus(root, gitDir, head),
@@ -325,6 +335,16 @@ export async function getFileContents(cwd: string, ctx: FileContext, ignoreWhite
     } else diff = synthesizeAddDiff(p, toText(mod))
   }
   const res: FileContents = { original: binary ? '' : toText(orig), modified: binary ? '' : toText(mod), binary, diff }
+  // a submodule (gitlink) changes the commit it points to: show those commits, like the original
+  if (diff && diff.headerLines.some((l) => /(^| )160000( |$)/.test(l))) {
+    const pick = (type: 'add' | 'del') => /Subproject commit ([0-9a-f]{7,64})/.exec(diff!.hunks.flatMap((h) => h.lines).find((l) => l.type === type)?.content ?? '')?.[1]
+    const describe = async (sha?: string) => {
+      if (!sha) return undefined
+      const m = await g(path.join(cwd, p), ['log', '-1', '--format=%s', sha], { allowFail: true })
+      return { sha, message: m.code === 0 ? m.stdout.trim() : '' }
+    }
+    res.submodule = { old: await describe(pick('del')), new: await describe(pick('add')) }
+  }
   const mime = imageMime(p)
   if (mime) {
     if (orig) res.originalImage = `data:${mime};base64,${orig.toString('base64')}`
@@ -375,8 +395,9 @@ export async function getBlame(cwd: string, file: string, sha?: string): Promise
   return parseBlame(await out(cwd, args))
 }
 
-export async function getFileHistory(cwd: string, file: string, limit = 500): Promise<Array<Commit & { path: string }>> {
-  const r = await g(cwd, ['log', '--follow', '-M', `-n${limit}`, `--format=%x1e${LOG_FORMAT}%x1d`, '--name-only', '--', file], { allowFail: true })
+/** commits that touched `file` (following renames), walking back from `from` (default HEAD), like the original */
+export async function getFileHistory(cwd: string, file: string, from?: string, limit = 500): Promise<Array<Commit & { path: string }>> {
+  const r = await g(cwd, ['log', '--follow', '-M', `-n${limit}`, `--format=%x1e${LOG_FORMAT}%x1d`, '--name-only', ...(from ? [from] : []), '--', file], { allowFail: true })
   if (r.code !== 0) return []
   const result: Array<Commit & { path: string }> = []
   for (const chunk of r.stdout.split('\x1e')) {
@@ -429,7 +450,8 @@ export async function discardFiles(cwd: string, files: FileChange[]): Promise<vo
 }
 
 export async function discardAll(cwd: string, unborn: boolean): Promise<void> {
-  if (!unborn) await g(cwd, ['reset', '--hard', '-q', 'HEAD'])
+  // restore rather than reset: a discard is not a reset in the reflog (Undo journals it as a discard)
+  if (!unborn) await g(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'])
   else await g(cwd, ['rm', '--cached', '-r', '-q', '.'], { allowFail: true })
   await g(cwd, ['clean', '-fd', '-q'])
 }
@@ -483,10 +505,29 @@ export async function getLastCommitMessage(cwd: string): Promise<string> {
 // Branches, tags, remotes
 
 export async function checkout(cwd: string, target: string): Promise<void> { await g(cwd, ['checkout', target]) }
+
+/** checkout; when local changes are in the way they are stashed ("Auto stash before checking out …") and popped after */
+export async function checkoutAutoStash(cwd: string, target: string, label?: string): Promise<AutoStash | undefined> {
+  try {
+    await checkout(cwd, target)
+    return undefined
+  } catch (e) {
+    const msg = (e as Error).message
+    if (!LOCAL_CHANGES.test(msg)) throw e
+    // the original names the branch, and says "HEAD" when the checkout detaches (commit or tag)
+    label ??= (await tryOut(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${target}`])) !== null ? target : 'HEAD'
+    await g(cwd, ['stash', 'push', ...(UNTRACKED_IN_WAY.test(msg) ? ['--include-untracked'] : []), '-m', `Auto stash before checking out "${label}"`])
+    try { await checkout(cwd, target) } catch (e2) { await popAutoStash(cwd); throw e2 }
+    return (await popAutoStash(cwd)) ? 'popped' : 'kept'
+  }
+}
 export async function restoreFile(cwd: string, sha: string, file: string): Promise<void> { await g(cwd, ['checkout', sha, '--', file]) }
 
-export async function checkoutRemote(cwd: string, remoteShort: string, localExists: boolean): Promise<string> {
+export async function checkoutRemote(cwd: string, remoteShort: string, localExists: boolean, opts: { newName?: string; reset?: boolean } = {}): Promise<string> {
   const local = remoteShort.split('/').slice(1).join('/')
+  if (opts.newName) { await g(cwd, ['checkout', '-b', opts.newName, '--track', `refs/remotes/${remoteShort}`]); return opts.newName }
+  // "Reset Local to Here": the local branch moves to the remote one and is checked out
+  if (opts.reset) { await g(cwd, ['checkout', '-B', local, '--track', `refs/remotes/${remoteShort}`]); return local }
   if (localExists) await g(cwd, ['checkout', local])
   else await g(cwd, ['checkout', '-b', local, '--track', `refs/remotes/${remoteShort}`])
   return local
@@ -527,6 +568,25 @@ export async function deleteTag(cwd: string, name: string): Promise<void> { awai
 export async function deleteRemoteTag(cwd: string, remote: string, name: string): Promise<void> {
   await net(cwd, 'push', ['push', '--progress', remote, `:refs/tags/${name}`])
 }
+/** move a tag to another commit, keeping its annotation (the original's "Fast-forward <tag> to <branch>") */
+export async function moveTag(cwd: string, name: string, to: string): Promise<void> {
+  const type = (await out(cwd, ['cat-file', '-t', `refs/tags/${name}`])).trim()
+  if (type === 'tag') {
+    const msg = (await out(cwd, ['tag', '-l', '--format=%(contents)', name])).trimEnd()
+    await g(cwd, ['tag', '-a', '-f', name, '-m', msg || name, to], { env: await identityProvider(cwd) })
+  } else await g(cwd, ['tag', '-f', name, to])
+}
+/** tag names on each remote (null when the remote could not be reached in time) */
+export async function remoteTags(cwd: string): Promise<Record<string, string[] | null>> {
+  const remotes = (await out(cwd, ['remote'])).split('\n').map((r) => r.trim()).filter(Boolean)
+  const res: Record<string, string[] | null> = {}
+  await Promise.all(remotes.map(async (r) => {
+    const ls = runGit(['ls-remote', '--tags', '--refs', r], { cwd, config: authConfigProvider(), allowFail: true, env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } })
+      .then((x) => (x.code === 0 ? x.stdout.split('\n').map((l) => l.split('\trefs/tags/')[1]?.trim()).filter((t): t is string => !!t) : null))
+    res[r] = await Promise.race([ls, new Promise<null>((ok) => setTimeout(() => ok(null), 10000))]).catch(() => null)
+  }))
+  return res
+}
 export async function pushTag(cwd: string, remote: string, name: string): Promise<void> {
   await net(cwd, 'push', ['push', '--progress', remote, `refs/tags/${name}`])
 }
@@ -557,12 +617,62 @@ async function wrap(fn: () => Promise<unknown>): Promise<OpResult> {
 
 const NO_EDITOR_ENV = { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true' }
 
-export const merge = (cwd: string, ref: string, opts: { noFF?: boolean; ffOnly?: boolean; squash?: boolean } = {}) =>
-  wrap(async () => g(cwd, ['merge', '--no-edit', ...(opts.noFF ? ['--no-ff'] : []), ...(opts.ffOnly ? ['--ff-only'] : []), ...(opts.squash ? ['--squash'] : []), ref], { env: { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) } }))
-export const rebase = (cwd: string, onto: string) => wrap(async () => g(cwd, ['rebase', onto], { env: { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) } }))
-export const cherryPick = (cwd: string, shas: string[]) => wrap(async () => g(cwd, ['cherry-pick', ...shas], { env: { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) } }))
-export const revert = (cwd: string, sha: string, isMerge: boolean) =>
-  wrap(async () => g(cwd, ['revert', '--no-edit', ...(isMerge ? ['-m', '1'] : []), sha], { env: { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) } }))
+// ---------------------------------------------------------------------------------------------
+// Auto stash, like the original: when local changes are in the way of an operation they are stashed
+// with a descriptive message, the operation runs, and the stash is popped again. A stash that cannot be
+// popped cleanly (or an operation that stopped on conflicts) keeps the stash, so nothing is lost.
+
+/** git's "your local changes are in the way" errors */
+const LOCAL_CHANGES = /would be overwritten by|commit your changes or stash them|Please commit or stash them|You have unstaged changes|Your index contains uncommitted changes|cannot (pull|rebase) with rebase/i
+const UNTRACKED_IN_WAY = /untracked working tree files would be/i
+
+async function popAutoStash(cwd: string): Promise<boolean> {
+  if ((await g(cwd, ['stash', 'pop', '--index'], { allowFail: true })).code === 0) return true
+  return (await g(cwd, ['stash', 'pop'], { allowFail: true })).code === 0
+}
+
+/** runs op; if git refuses because of local changes, stashes them, runs it again and pops the stash */
+async function withAutoStash(cwd: string, message: string, op: () => Promise<OpResult>): Promise<OpResult> {
+  const first = await op()
+  if (first.ok || first.conflicts || !LOCAL_CHANGES.test(first.error ?? '')) return first
+  try { await g(cwd, ['stash', 'push', ...(UNTRACKED_IN_WAY.test(first.error ?? '') ? ['--include-untracked'] : []), '-m', message]) } catch { return first }
+  const res = await op()
+  if (res.conflicts) return { ...res, autoStash: 'kept' }
+  return { ...res, autoStash: (await popAutoStash(cwd)) ? 'popped' : 'kept' }
+}
+
+/** for ops that leave state behind when they fail (cherry pick, revert): stash tracked changes before starting */
+async function stashFirst(cwd: string, message: string, op: () => Promise<OpResult>): Promise<OpResult> {
+  const dirty = (await g(cwd, ['status', '--porcelain', '--untracked-files=no'])).stdout.trim() !== ''
+  if (!dirty) return op()
+  await g(cwd, ['stash', 'push', '-m', message])
+  const res = await op()
+  if (res.conflicts) return { ...res, autoStash: 'kept' }
+  return { ...res, autoStash: (await popAutoStash(cwd)) ? 'popped' : 'kept' }
+}
+
+const headName = async (cwd: string) => (await tryOut(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']))?.trim() || 'HEAD'
+const shortSubject = async (cwd: string, sha: string) => (await tryOut(cwd, ['log', '-1', '--format=%s', sha]))?.trim() || sha.slice(0, 7)
+
+export async function merge(cwd: string, ref: string, opts: { noFF?: boolean; ffOnly?: boolean; squash?: boolean } = {}): Promise<OpResult> {
+  const env = { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) }
+  return withAutoStash(cwd, `Auto stash before merge of "${await headName(cwd)}" and "${ref}"`, () =>
+    wrap(() => g(cwd, ['merge', '--no-edit', ...(opts.noFF ? ['--no-ff'] : []), ...(opts.ffOnly ? ['--ff-only'] : []), ...(opts.squash ? ['--squash'] : []), ref], { env })))
+}
+export async function rebase(cwd: string, onto: string): Promise<OpResult> {
+  const env = { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) }
+  return withAutoStash(cwd, `Auto stash before rebase of "${await headName(cwd)}" onto "${onto}"`, () => wrap(() => g(cwd, ['rebase', onto], { env })))
+}
+export async function cherryPick(cwd: string, shas: string[], noCommit = false): Promise<OpResult> {
+  const env = { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) }
+  return stashFirst(cwd, `Auto stash before cherry pick of "${await shortSubject(cwd, shas[0])}"`, () =>
+    wrap(() => g(cwd, ['cherry-pick', ...(noCommit ? ['--no-commit'] : []), ...shas], { env })))
+}
+export async function revert(cwd: string, sha: string, isMerge: boolean, noCommit = false): Promise<OpResult> {
+  const env = { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) }
+  return stashFirst(cwd, `Auto stash before revert of "${await shortSubject(cwd, sha)}"`, () =>
+    wrap(() => g(cwd, ['revert', '--no-edit', ...(noCommit ? ['--no-commit'] : []), ...(isMerge ? ['-m', '1'] : []), sha], { env })))
+}
 export const reset = (cwd: string, sha: string, mode: ResetMode) => wrap(() => g(cwd, ['reset', `--${mode}`, sha]))
 /** moves HEAD while keeping uncommitted changes (fails instead of overwriting them) */
 export async function resetKeep(cwd: string, sha: string): Promise<void> { await g(cwd, ['reset', '--keep', sha]) }
@@ -602,9 +712,9 @@ export async function interactiveRebase(cwd: string, base: string | null, items:
   }
   const todo = path.join(dir, 'todo.txt')
   await fs.writeFile(todo, lines.join('\n') + '\n', 'utf8')
-  const res = await wrap(async () => g(cwd, ['rebase', '-i', '--autostash', base ?? '--root'], {
-    env: { GIT_SEQUENCE_EDITOR: `cp '${toSh(todo)}'`, GIT_EDITOR: 'true', ...(await identityProvider(cwd)) }
-  }))
+  // local changes are stashed with the original's message and restored with their staged state afterwards
+  const env = { GIT_SEQUENCE_EDITOR: `cp '${toSh(todo)}'`, GIT_EDITOR: 'true', ...(await identityProvider(cwd)) }
+  const res = await stashFirst(cwd, `Auto stash before rebase of "${await headName(cwd)}"`, () => wrap(() => g(cwd, ['rebase', '-i', base ?? '--root'], { env })))
   if (res.ok) await fs.rm(dir, { recursive: true, force: true })
   return res
 }
@@ -661,10 +771,39 @@ export async function addWorktree(cwd: string, dir: string, opts: { branch?: str
   else args.push('--detach', dir, opts.commit ?? 'HEAD')
   await g(cwd, args)
 }
+/** the original's checks for the Create Worktree form (null = fine) */
+export async function validateWorktree(cwd: string, o: { ref: string; branch: string; createBranch: boolean; dir: string }): Promise<{ level: 'error' | 'warning'; message: string } | null> {
+  const branches = (await out(cwd, ['for-each-ref', '--format=%(refname)', 'refs/heads'])).split('\n').filter(Boolean)
+  const wts = parseWorktrees(await out(cwd, ['worktree', 'list', '--porcelain']), cwd)
+  if (o.ref) {
+    if (o.createBranch) {
+      if (o.branch && branches.includes(`refs/heads/${o.branch}`)) return { level: 'error', message: 'Cannot create worktree because a local branch with the same name already exists' }
+    } else if (o.branch && wts.some((w) => w.branch === o.branch)) return { level: 'error', message: 'Cannot create worktree because a worktree with the same branch name already exists' }
+    if ((await tryOut(cwd, ['rev-parse', '--verify', '--quiet', `${o.ref}^{commit}`])) === null) return { level: 'error', message: 'Cannot create worktree because the specified reference does not exist' }
+  }
+  if (o.branch && (await tryOut(cwd, ['check-ref-format', '--branch', o.branch])) === null) return { level: 'error', message: 'Cannot create worktree because the specified reference name is invalid' }
+  if (o.dir) {
+    if (existsSync(o.dir)) return { level: 'error', message: 'Cannot create worktree because the specified working directory already exists' }
+    const inside = wts.some((w) => { const rel = path.relative(w.path, o.dir); return rel && !rel.startsWith('..') && !path.isAbsolute(rel) })
+    if (inside) return { level: 'warning', message: 'It is not recommended to choose a location inside a working directory. If you wish to proceed, please make sure your .gitignore is properly configured.' }
+  }
+  return null
+}
 export async function removeWorktree(cwd: string, dir: string, force: boolean): Promise<void> {
-  await g(cwd, ['worktree', 'remove', ...(force ? ['--force'] : []), dir])
+  // a locked worktree needs the flag twice
+  await g(cwd, ['worktree', 'remove', ...(force ? ['--force', '--force'] : []), dir])
 }
 export async function pruneWorktrees(cwd: string): Promise<void> { await g(cwd, ['worktree', 'prune']) }
+export async function lockWorktree(cwd: string, dir: string, reason: string | null): Promise<void> {
+  if (reason === null) await g(cwd, ['worktree', 'unlock', dir])
+  else await g(cwd, ['worktree', 'lock', ...(reason.trim() ? ['--reason', reason.trim()] : []), dir])
+}
+/** like the original: deinit and remove it (its git dir under .git/modules is kept); "Delete & Commit" commits just that */
+export async function deleteSubmodule(cwd: string, sub: string, commit = false): Promise<void> {
+  await g(cwd, ['submodule', 'deinit', '-f', '--', sub])
+  await g(cwd, ['rm', '-f', '--', sub])
+  if (commit) await g(cwd, ['commit', '-m', `Removed submodule ${sub}`, '--', '.gitmodules', sub], { env: await identityProvider(cwd) })
+}
 
 // ---------------------------------------------------------------------------------------------
 // Network
@@ -679,22 +818,43 @@ export async function fetchRemote(cwd: string, remote: string, prune = true): Pr
 
 export async function pull(cwd: string, mode: PullMode): Promise<OpResult> {
   if (mode === 'fetch') return wrap(() => fetchAll(cwd))
-  const flag = mode === 'rebase' ? '--rebase' : mode === 'ff-only' ? '--ff-only' : '--no-rebase'
-  return wrap(async () => net(cwd, 'pull', ['pull', '--progress', '--no-edit', flag], { env: { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) } }))
+  const env = { ...NO_EDITOR_ENV, ...(await identityProvider(cwd)) }
+  const branch = await headName(cwd)
+  const remote = branch !== 'HEAD' ? (await tryOut(cwd, ['config', `branch.${branch}.remote`]))?.trim() : undefined
+  const upstream = (await tryOut(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']))?.trim()
+  if (!remote || !upstream) {
+    const flag = mode === 'rebase' ? '--rebase' : mode === 'ff-only' ? '--ff-only' : '--no-rebase'
+    return wrap(() => net(cwd, 'pull', ['pull', '--progress', '--no-edit', flag], { env }))
+  }
+  if (remote !== '.') {
+    const f = await wrap(() => net(cwd, 'fetch', ['fetch', '--progress', remote]))
+    if (!f.ok) return f
+  }
+  const before = (await tryOut(cwd, ['rev-parse', 'HEAD']))?.trim()
+  const res = mode === 'rebase'
+    ? await withAutoStash(cwd, `Auto stash before rebase of "${branch}" onto "${upstream}"`, () => wrap(() => g(cwd, ['rebase', upstream], { env })))
+    : await withAutoStash(cwd, `Auto stash before merge of "${branch}" and "${upstream}"`, () =>
+      wrap(() => g(cwd, ['merge', '--no-edit', ...(mode === 'ff-only' ? ['--ff-only'] : []), upstream], { env })))
+  if (res.ok && !res.conflicts) res.upToDate = (await tryOut(cwd, ['rev-parse', 'HEAD']))?.trim() === before
+  return res
 }
 
-export async function push(cwd: string, opts: { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean }): Promise<OpResult> {
+export async function push(cwd: string, opts: { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean; noLease?: boolean }): Promise<OpResult> {
   const args = ['push', '--progress', '--porcelain']
   if (opts.setUpstream) args.push('-u')
-  if (opts.force) args.push('--force-with-lease')
+  if (opts.force) args.push(opts.noLease ? '--force' : '--force-with-lease')
   args.push(opts.remote, `refs/heads/${opts.branch}:refs/heads/${opts.remoteBranch ?? opts.branch}`)
   try {
-    await net(cwd, 'push', args)
-    return { ok: true }
+    const r = await net(cwd, 'push', args, { allowFail: true })
+    if (r.code === 0) return { ok: true }
+    const text = `${r.stdout}\n${r.stderr}`
+    // a lease failure means the remote moved since the last fetch
+    if (opts.force && /stale info/i.test(text)) return { ok: false, error: 'stale' }
+    if (/\[rejected\]|non-fast-forward|fetch first|stale info/i.test(text)) return { ok: false, error: 'rejected' }
+    const msg = r.stderr.trim().split('\n').filter((l) => !/^hint:/.test(l) && l.trim()).join('\n')
+    return { ok: false, error: msg || r.stdout.trim() || `git push failed with code ${r.code}` }
   } catch (e) {
-    const msg = (e as Error).message
-    if (/rejected|non-fast-forward|fetch first|stale info/i.test(msg)) return { ok: false, error: 'rejected' }
-    return { ok: false, error: msg }
+    return { ok: false, error: (e as Error).message }
   }
 }
 

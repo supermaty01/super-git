@@ -45,6 +45,8 @@ export interface Stash {
   parents: string[]
   message: string
   date: number
+  author?: string
+  email?: string
 }
 
 export interface Worktree {
@@ -186,6 +188,8 @@ export interface FileContents {
   /** data: URLs for image files (binary diffs of images) */
   originalImage?: string
   modifiedImage?: string
+  /** the entry is a submodule: the commits it points to before / after, with their messages */
+  submodule?: { old?: { sha: string; message: string }; new?: { sha: string; message: string } }
 }
 
 export interface ConflictSides {
@@ -261,6 +265,8 @@ export interface Settings {
   autoFetchMinutes: number
   theme: 'dark' | 'light'
   graphColumns: GraphColumns
+  /** graph column order (ids of GraphColumns), set by dragging the headers */
+  graphColumnOrder?: string[]
   graphShow: { tags: boolean; stashes: boolean; remotes: boolean }
   externalEditor: string
   terminalShell: 'powershell' | 'pwsh' | 'cmd' | 'gitbash'
@@ -298,6 +304,8 @@ export interface Settings {
 
   // Commit
   pushAfterCommit: boolean
+  /** "Don't ask again" on the force push confirmation */
+  forcePushSkipSecondWarning: boolean
   skipHooksDefault: boolean
   stripComments: boolean
 
@@ -318,6 +326,20 @@ export interface Settings {
   // External tools
   /** command that opens a terminal in the repo; {path} is replaced ('' = Windows Terminal / PowerShell) */
   externalTerminal: string
+  /** load every commit instead of the first commitLimit */
+  showAllCommits: boolean
+  /** "Open Terminal" uses the in-app terminal panel */
+  useInAppTerminal: boolean
+  /** write the active profile's name / email into the global .gitconfig when switching */
+  syncGitConfigWithProfile: boolean
+  /** SSH: use the system ssh-agent; when off, sshPrivateKey is passed to ssh */
+  sshUseAgent: boolean
+  sshPrivateKey: string
+  sshPublicKey: string
+  /** desktop notifications for messages shown while SuperGit is in the background */
+  desktopNotifications: boolean
+  /** branch visibility for repositories opened for the first time */
+  defaultSmartVisibility: boolean
 }
 
 export type ProviderId = 'github' | 'github-enterprise' | 'gitlab' | 'gitlab-self' | 'bitbucket' | 'bitbucket-server' | 'azure'
@@ -405,7 +427,16 @@ export interface OpResult {
   /** true when the op stopped because of conflicts */
   conflicts?: boolean
   output?: string
+  /** local changes were stashed first (like the original's auto stash): popped again, or kept as a stash */
+  autoStash?: AutoStash
+  /** pull: nothing came in (HEAD did not move) */
+  upToDate?: boolean
 }
+
+export type AutoStash = 'popped' | 'kept'
+
+/** Undo / Redo toolbar state: enabled, its tooltip, and (reset/rebase over local changes) the branch to stash first */
+export interface UndoPreview { valid: boolean; tip: string; needsStash?: string }
 
 /** A repository another Git client (GitKraken) has open, with what the user chose to hide there. */
 export interface GitKrakenRepo {

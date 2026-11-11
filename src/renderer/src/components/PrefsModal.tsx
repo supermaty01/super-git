@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { useStore, closeModal, toast } from '../store'
+import { useStore, closeModal, toast, activeRepoPath } from '../store'
 import { api } from '../lib/api'
 import * as A from '../actions'
 import { saveSettings, switchProfile } from '../actions2'
@@ -13,12 +13,12 @@ import type { PullMode, Settings, SshKey, GpgKey, LfsInfo, Profile } from '@shar
 function Frame({ title, nav, tab, setTab, children }: { title: string; nav: Array<[string, string, string]>; tab: string; setTab: (t: string) => void; children: ReactNode }) {
   return (
     <div className="modal prefs-modal">
-      <div className="modal-header"><span>{title}</span><span className="modal-close" onClick={closeModal}><Icon name="times" /></span></div>
       <div className="clone-layout">
         <div className="clone-nav">
-          {nav.map(([id, label, icon]) => (
-            <div key={id} className={`clone-nav-item${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}><Icon name={icon} /> {label}</div>
-          ))}
+          <div className="clone-nav-item prefs-exit" onClick={closeModal}><Icon name="chevron-left" /> Exit Preferences</div>
+          {nav.map(([id, label, icon]) => id.startsWith('heading:')
+            ? <div key={id} className="prefs-nav-heading" title={title}>{label}</div>
+            : <div key={id} className={`clone-nav-item${tab === id ? ' active' : ''}`} onClick={() => setTab(id)}><Icon name={icon} /> {label}</div>)}
         </div>
         <div className="clone-content">{children}</div>
       </div>
@@ -109,18 +109,28 @@ export function applyTheme(theme: 'dark' | 'light'): void {
 // =============================================================================================
 // Application preferences
 
+// the original's order
 const NAV: Array<[string, string, string]> = [
-  ['general', 'General', 'cog'], ['ui', 'UI Customization', 'eye'], ['profiles', 'Profiles', 'user'], ['integrations', 'Integrations', 'link'],
-  ['commit', 'Commit', 'commit'], ['signing', 'Commit Signing', 'check-circle'], ['ssh', 'SSH', 'key'], ['editor', 'Editor', 'file-lines'],
-  ['terminal', 'In-App Terminal', 'terminal'], ['tools', 'External Tools', 'external']
+  ['general', 'General', 'cog'], ['profiles', 'Profiles', 'user'], ['ssh', 'SSH', 'key'], ['integrations', 'Integrations', 'link'],
+  ['tools', 'External Tools', 'external'], ['notifications', 'Notifications', 'bell'], ['ui', 'UI Customization', 'eye'],
+  ['commit', 'Commit', 'commit'], ['signing', 'Commit Signing', 'check-circle'], ['editor', 'Editor', 'file-lines'],
+  ['terminal', 'In-App Terminal', 'terminal']
+]
+const REPO_NAV: Array<[string, string, string]> = [
+  ['repo:general', 'General', 'cog'], ['repo:gitignore', '.gitignore', 'file-lines'], ['repo:commit', 'Commit', 'commit'], ['repo:gitflow', 'Gitflow', 'merge'],
+  ['repo:hooks', 'Git Hooks', 'commit'], ['repo:lfs', 'LFS', 'download'], ['repo:submodules', 'Submodules', 'folder-tree'], ['repo:sparse', 'Sparse Checkout', 'filter']
 ]
 const LEGACY_SECTIONS: Record<string, string> = { azure: 'integrations', keys: 'ssh', appearance: 'ui' }
 
-export function PrefsModal({ section }: { section?: string }) {
+export function PrefsModal({ section, repoPath }: { section?: string; repoPath?: string }) {
   const [tab, setTab] = useState(LEGACY_SECTIONS[section ?? ''] ?? section ?? 'general')
+  const repo = repoPath ?? activeRepoPath() ?? null
+  const nav = repo ? [...NAV, ['heading:repo', `Repo-Specific Preferences — ${repo.split(/[\\/]/).pop()}`, ''] as [string, string, string], ...REPO_NAV] : NAV
+  const repoTab = tab.startsWith('repo:') ? tab.slice(5) : null
   return (
-    <Frame title="Preferences" tab={tab} setTab={setTab} nav={NAV}>
-      {tab === 'general' ? <GeneralSection />
+    <Frame title="Preferences" tab={tab} setTab={setTab} nav={nav}>
+      {repoTab && repo ? <RepoSection path={repo} tab={repoTab} />
+        : tab === 'general' ? <GeneralSection />
         : tab === 'ui' ? <UiSection />
           : tab === 'profiles' ? <ProfilesSection />
             : tab === 'integrations' ? <IntegrationsSection />
@@ -128,9 +138,38 @@ export function PrefsModal({ section }: { section?: string }) {
                 : tab === 'signing' ? <SigningSection />
                   : tab === 'ssh' ? <SshSection />
                     : tab === 'editor' ? <EditorSection />
+                      : tab === 'notifications' ? <NotificationsSection />
                       : tab === 'terminal' ? <TerminalSection />
                         : <ToolsSection />}
     </Frame>
+  )
+}
+
+function NotificationsSection() {
+  return (
+    <>
+      <div className="clone-title">Notifications</div>
+      <Check k="desktopNotifications" label="Enable desktop notifications" help="Show Windows notifications for messages that arrive while SuperGit is in the background." />
+      <Pick k="toastPosition" label="Notification location" options={[['bottom-left', 'Bottom Left'], ['bottom-right', 'Bottom Right'], ['top-left', 'Top Left'], ['top-right', 'Top Right']]} />
+    </>
+  )
+}
+
+function SshKeyPaths() {
+  const settings = useStore((s) => s.settings!)
+  const browse = async (k: 'sshPrivateKey' | 'sshPublicKey') => {
+    const f = await api.pickOpenFile(k === 'sshPrivateKey' ? 'Select SSH private key' : 'Select SSH public key', [{ name: 'All files', extensions: ['*'] }])
+    if (f) saveSettings({ [k]: f } as Partial<Settings>)
+  }
+  return (
+    <>
+      <Row label="SSH private key" right={<button className="btn btn-primary btn-small" onClick={() => browse('sshPrivateKey')}>Browse</button>}>
+        <input className="form-control" placeholder="~/.ssh/id_ed25519" value={settings.sshPrivateKey} onChange={(e) => saveSettings({ sshPrivateKey: e.target.value })} />
+      </Row>
+      <Row label="SSH public key" right={<button className="btn btn-primary btn-small" onClick={() => browse('sshPublicKey')}>Browse</button>}>
+        <input className="form-control" placeholder="~/.ssh/id_ed25519.pub" value={settings.sshPublicKey} onChange={(e) => saveSettings({ sshPublicKey: e.target.value })} />
+      </Row>
+    </>
   )
 }
 
@@ -157,8 +196,10 @@ function GeneralSection() {
           <option value="fetch">Fetch All</option><option value="ff">Pull (fast-forward if possible)</option><option value="ff-only">Pull (fast-forward only)</option><option value="rebase">Pull (rebase)</option>
         </select>
       </Row>
+      <Check k="showAllCommits" label="Show All Commits in Graph" help="Load the whole history instead of the first commits below. Large repositories open more slowly." />
       <Num k="commitLimit" label="Initial Commits in Graph" min={200} max={100000} step={500} help="More commits load from the bottom of the graph. Large values can slow the graph down." />
       <GitText k="init.defaultBranch" label="Default Branch Name" placeholder="master (git default)" help="The first branch of new repositories (init.defaultBranch in your global git config)." />
+      <Check k="useInAppTerminal" label="Use In-App Terminal instead" help="“Open Terminal” (Alt+T) opens the terminal panel instead of an external terminal." />
       <Check k="rememberTabs" label="Remember tabs" help="Reopen the repositories that were open when SuperGit closed." />
       <Check k="updateSubmodules" label="Keep submodules up to date" help="Update all submodules after checkouts, pulls, merges and other actions that move HEAD." />
       <GitBool k="mergetool.keepBackup" label="Keep .orig files after merging" defaultOn help="Turn off to delete the .orig backups that git's merge tool leaves behind (mergetool.keepBackup)." />
@@ -228,6 +269,17 @@ function UiSection() {
       <Check k="highlightOnRefHover" label="Highlight associated rows when hovering over a branch" />
       <Check k="authorInitials" label="Display author initials instead of avatars" />
       <Check k="compactGraph" label="Compact graph column" />
+      <Row label="Branch visibility in commit graph" help="For repositories opened for the first time.">
+        <select className="form-control" value={useStore.getState().settings!.defaultSmartVisibility ? 'smart' : 'all'} onChange={(e) => saveSettings({ defaultSmartVisibility: e.target.value === 'smart' })}>
+          <option value="all">All branches</option><option value="smart">Smart branch visibility</option>
+        </select>
+      </Row>
+      <Row label="Columns" right={<span />}>
+        <span className="inline-pair">
+          <button className="btn btn-default btn-small" onClick={() => saveSettings({ compactGraph: false, layout: { ...useStore.getState().settings!.layout, refColWidth: 150, graphColWidth: 0 } })}>Reset columns to default layout</button>
+          <button className="btn btn-default btn-small" onClick={() => saveSettings({ compactGraph: true, layout: { ...useStore.getState().settings!.layout, refColWidth: 110, graphColWidth: 0 } })}>Compact layout</button>
+        </span>
+      </Row>
 
       <div className="clone-title mt3">Diff &amp; files</div>
       <Pick k="diffMode" label="Default diff view" options={[['hunk', 'Hunk'], ['inline', 'Inline'], ['split', 'Split']]} />
@@ -360,6 +412,7 @@ function ProfilesSection() {
         </div>
       ))}
       <button className="btn btn-success btn-small" onClick={add}><Icon name="plus" /> Add profile</button>
+      <Check k="syncGitConfigWithProfile" label="Keep my .gitconfig updated with my profile" help="Switching profiles writes the profile's name and email to your global git config (user.name / user.email)." />
       <div className="clone-title mt3">Global git identity</div>
       <Row label="user.name"><input className="form-control" value={gName} onChange={(e) => setGName(e.target.value)} /></Row>
       <Row label="user.email"><input className="form-control" value={gEmail} onChange={(e) => setGEmail(e.target.value)} /></Row>
@@ -401,6 +454,9 @@ function SshSection() {
       <Row label="Generate new key" right={<button className="btn btn-success btn-small" onClick={generate}>Generate</button>}>
         <span className="inline-pair"><input className="form-control" placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} /><input className="form-control" placeholder="file name" value={keyName} onChange={(e) => setKeyName(e.target.value)} /></span>
       </Row>
+      <Check k="sshUseAgent" label="Use local SSH agent" help="Let ssh use the keys loaded in your SSH agent (and ~/.ssh). Turn off to use the private key below." />
+      {!useStore.getState().settings!.sshUseAgent ? <SshKeyPaths /> : null}
+      <GitBool k="credential.helper" label="Use default Git Credential Manager" help="HTTPS sign-ins go through Git Credential Manager (credential.helper=manager)." />
       <GitText k="core.sshCommand" label="SSH command (core.sshCommand)" placeholder="ssh (bundled with Git)" help={<>For example <code>C:/Windows/System32/OpenSSH/ssh.exe</code> to use the Windows OpenSSH agent.</>} />
     </>
   )
@@ -450,6 +506,11 @@ function SigningSection() {
           </select>
         )}
       </Row>
+      {signing.format === 'openpgp' && signing.key ? (
+        <Row label="Public key" right={<span />}>
+          <button className="btn btn-default btn-small" onClick={async () => { try { await api.copy(await api.gpgPublicKey(signing.key)); toast({ kind: 'success', title: 'GPG public key copied' }, 2000) } catch (e) { toast({ kind: 'error', title: 'Could not export the key', message: errMsg(e) }) } }}>Copy GPG public key</button>
+        </Row>
+      ) : null}
       {signing.format === 'openpgp' && gpg && !gpg.length ? <div className="text-secondary fs-small indent-form">No GPG secret keys found (gpg --list-secret-keys).</div> : null}
       {signing.format === 'openpgp'
         ? <GitText k="gpg.program" label="GPG program" placeholder="gpg (bundled with Git)" browse="Select gpg.exe" help="Path to gpg.exe, for example Gpg4win's C:/Program Files (x86)/GnuPG/bin/gpg.exe." />
@@ -465,13 +526,76 @@ function SigningSection() {
 // Repository preferences
 
 export function RepoPrefsModal({ path, section }: { path: string; section?: string }) {
-  const [tab, setTab] = useState(section ?? 'general')
+  return <PrefsModal repoPath={path} section={`repo:${section ?? 'general'}`} />
+}
+
+function RepoSection({ path, tab }: { path: string; tab: string }) {
+  return tab === 'gitignore' ? <GitignoreEditor path={path} />
+    : tab === 'gitflow' ? <GitflowConfigView path={path} />
+      : tab === 'lfs' ? <LfsView path={path} />
+        : tab === 'hooks' ? <HooksView path={path} />
+          : tab === 'commit' ? <RepoCommit path={path} />
+            : tab === 'submodules' ? <RepoSubmodules path={path} />
+              : tab === 'sparse' ? <SparseCheckout path={path} />
+                : <RepoGeneral path={path} />
+}
+
+function RepoCommit({ path }: { path: string }) {
+  const [vals, setVals] = useRepoConfig(path, ['commit.template', 'commit.gpgsign'])
   return (
-    <Frame title={`Repository Preferences — ${path.split(/[\\/]/).pop()}`} tab={tab} setTab={setTab} nav={[
-      ['general', 'General', 'cog'], ['gitignore', '.gitignore', 'file-lines'], ['gitflow', 'Gitflow', 'merge'], ['lfs', 'Git LFS', 'download'], ['hooks', 'Hooks & Template', 'commit']
-    ]}>
-      {tab === 'general' ? <RepoGeneral path={path} /> : tab === 'gitignore' ? <GitignoreEditor path={path} /> : tab === 'gitflow' ? <GitflowConfigView path={path} /> : tab === 'lfs' ? <LfsView path={path} /> : <HooksView path={path} />}
-    </Frame>
+    <>
+      <div className="clone-title">Commit</div>
+      <Row label="Commit template" help="A message template for this repository only (commit.template in .git/config).">
+        <input className="form-control" placeholder="(uses the global template)" value={vals['commit.template'] ?? ''} onChange={(e) => setVals({ ...vals, 'commit.template': e.target.value })} />
+      </Row>
+      <Row label="Sign commits in this repository">
+        <select className="form-control" value={vals['commit.gpgsign'] ?? ''} onChange={(e) => setVals({ ...vals, 'commit.gpgsign': e.target.value })}>
+          <option value="">Use the global setting</option><option value="true">Always</option><option value="false">Never</option>
+        </select>
+      </Row>
+      <div className="clone-actions"><button className="btn btn-success btn-small" onClick={() => saveRepoConfig(path, vals)}>Save</button></div>
+    </>
+  )
+}
+
+function RepoSubmodules({ path }: { path: string }) {
+  const [vals, setVals] = useRepoConfig(path, ['submodule.recurse', 'fetch.recurseSubmodules'])
+  return (
+    <>
+      <div className="clone-title">Submodules</div>
+      <Row label="Recurse into submodules" help="Checkout, pull and other commands also update submodules (submodule.recurse).">
+        <input type="checkbox" checked={vals['submodule.recurse'] === 'true'} onChange={(e) => setVals({ ...vals, 'submodule.recurse': e.target.checked ? 'true' : '' })} />
+      </Row>
+      <Row label="Fetch submodules" help="When fetching, also fetch submodules (fetch.recurseSubmodules).">
+        <select className="form-control" value={vals['fetch.recurseSubmodules'] ?? ''} onChange={(e) => setVals({ ...vals, 'fetch.recurseSubmodules': e.target.value })}>
+          <option value="">On demand (git default)</option><option value="true">Always</option><option value="false">Never</option>
+        </select>
+      </Row>
+      <div className="clone-actions"><button className="btn btn-success btn-small" onClick={() => saveRepoConfig(path, vals)}>Save</button></div>
+    </>
+  )
+}
+
+function SparseCheckout({ path }: { path: string }) {
+  const [state, setStateLocal] = useState<{ enabled: boolean; patterns: string[] } | null>(null)
+  const [text, setText] = useState('')
+  const load = () => { void api.sparseCheckout(path).then((s) => { setStateLocal(s); setText(s.patterns.join('\n')) }) }
+  useEffect(load, [path])
+  const apply = async (patterns: string[] | null) => {
+    await A.run(path, () => api.sparseCheckoutSet(path, patterns), { busy: 'Updating sparse checkout', success: patterns ? 'Sparse checkout updated' : 'Sparse checkout turned off', errorTitle: 'Sparse checkout failed' })
+    load()
+  }
+  if (!state) return <div className="text-secondary">Loading…</div>
+  return (
+    <>
+      <div className="clone-title">Sparse Checkout {state.enabled ? <span className="pill pill-teal">Enabled</span> : null}</div>
+      <div className="text-secondary fs-small mb2">Only the listed folders (one per line) are checked out in the working directory; the rest of the history stays in the repository.</div>
+      <textarea className="form-control code-area" rows={8} placeholder={'src\ndocs'} value={text} onChange={(e) => setText(e.target.value)} />
+      <div className="clone-actions">
+        {state.enabled ? <button className="btn btn-danger btn-small" onClick={() => apply(null)}>Disable</button> : null}
+        <button className="btn btn-success btn-small" disabled={!text.trim()} onClick={() => apply(text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))}>{state.enabled ? 'Update' : 'Enable'}</button>
+      </div>
+    </>
   )
 }
 
@@ -606,39 +730,80 @@ function HooksView({ path }: { path: string }) {
 
 // =============================================================================================
 
-const SHORTCUTS: Array<[string, string]> = [
-  ['Ctrl+P', 'Command palette / fuzzy finder (files, branches, commands)'],
-  ['Ctrl+F', 'Search commits'],
-  ['Ctrl+Enter', 'Commit (in the commit message)'],
-  ['Ctrl+Shift+S / Ctrl+Shift+U', 'Stage all / unstage all'],
-  ['Ctrl+Shift+M', 'Focus the commit message'],
-  ['Ctrl+B', 'Create branch'],
-  ['Ctrl+L', 'Fetch all'],
-  ['Ctrl+Z / Ctrl+Y', 'Undo / redo'],
-  ['Ctrl+`', 'Toggle terminal'],
-  ['Ctrl+T', 'Repository management'],
-  ['Ctrl+W / Ctrl+Shift+T', 'Close tab / reopen closed tab'],
-  ['Ctrl+Tab / Ctrl+Shift+Tab', 'Next / previous tab'],
-  ['Ctrl+J / Ctrl+K', 'Show or hide the left panel / commit details panel'],
-  ['Ctrl+1 … Ctrl+9', 'Go to tab 1 … 9'],
-  ['Ctrl+Alt+1 … Ctrl+Alt+9', 'Open favorite repository 1 … 9'],
-  ['Ctrl+N / Ctrl+I / Ctrl+O', 'Clone / init / open a repository'],
-  ['Ctrl+Shift+E', 'Open the repository in the external editor'],
-  ['Alt+T / Alt+O', 'Open an external terminal / the file manager here'],
-  ['Ctrl+Shift+F or F11', 'Full screen'],
-  ['Ctrl+, ', 'Preferences'],
-  ['Ctrl+= / Ctrl+- / Ctrl+0', 'Zoom in / out / reset'],
-  ['↑ / ↓ (graph)', 'Move selection, Shift to extend'],
-  ['Esc', 'Close diff / search'],
-  ['Ctrl+/', 'This list']
+// the original's list and groups (only what SuperGit supports)
+const SHORTCUTS: Array<{ group: string; items: Array<[string, string[][]]> }> = [
+  { group: 'Repo Actions', items: [
+    ['Create Branch', [['Ctrl', 'B']]],
+    ['Fetch All', [['Ctrl', 'L']]],
+    ['Commit (when in message input)', [['Ctrl', 'Enter']]],
+    ['Stage Current File', [['S']]],
+    ['Unstage Current File', [['U']]],
+    ['Stage All Files', [['Ctrl', 'Shift', 'S']]],
+    ['Unstage All Files', [['Ctrl', 'Shift', 'U']]],
+    ['Stage All + Commit (when in message input)', [['Ctrl', 'Shift', 'Enter']]],
+    ['Focus commit message', [['Ctrl', 'Shift', 'M']]],
+    ['Open in default terminal', [['Alt', 'T']]]
+  ] },
+  { group: 'Navigation', items: [
+    ['Select Previous Item', [['↑'], ['K']]],
+    ['Select Next Item', [['↓'], ['J']]],
+    ['Select Next Item in Branch', [['Shift', '↓'], ['Shift', 'J']]],
+    ['Select Previous Item in Branch', [['Shift', '↑'], ['Shift', 'K']]],
+    ['Select First Item', [['Ctrl', 'Home']]],
+    ['Select Last Item', [['Ctrl', 'End']]],
+    ['Undo', [['Ctrl', 'Z']]],
+    ['Redo', [['Ctrl', 'Y'], ['Ctrl', 'Shift', 'Z']]]
+  ] },
+  { group: 'Command Palette', items: [
+    ['Toggle Command Palette', [['Ctrl', 'P']]],
+    ['Search commits', [['Ctrl', 'F']]],
+    ['Filter the left panel', [['Ctrl', 'Alt', 'F']]],
+    ['Open Repo via Command Palette', [['Ctrl', 'Shift', 'O']]],
+    ['Search for a file to view its history / blame', [['Ctrl', 'Shift', 'H']]],
+    ['Open Selected File in External Diff/Merge Tool', [['Ctrl', 'D']]]
+  ] },
+  { group: 'UI', items: [
+    ['Open a new tab', [['Ctrl', 'T']]],
+    ['Close File/Tab', [['Ctrl', 'W']]],
+    ['Close View', [['Escape']]],
+    ['Reopen closed tab', [['Ctrl', 'Shift', 'T']]],
+    ['Jump to the next open tab', [['Ctrl', 'Tab']]],
+    ['Jump to the previous open tab', [['Ctrl', 'Shift', 'Tab']]],
+    ['Jump to a specific tab', [['Ctrl', '1–9']]],
+    ['Open tabs list', [['Ctrl', 'Shift', 'A']]],
+    ['Toggle Left Panel', [['Ctrl', 'J']]],
+    ['Toggle Commit Details Panel', [['Ctrl', 'K']]],
+    ['Toggle Terminal Panel', [['Ctrl', '`']]],
+    ['Preferences', [['Ctrl', ',']]],
+    ['Increase / Decrease / Reset Zoom', [['Ctrl', '='], ['Ctrl', '-'], ['Ctrl', '0']]],
+    ['Toggle Full Screen', [['F11']]],
+    ['Keyboard Shortcuts', [['Ctrl', '/']]]
+  ] }
 ]
 
 export function ShortcutsModal() {
   return (
-    <div className="modal" style={{ width: 560 }}>
+    <div className="modal shortcuts-modal" style={{ width: 620 }}>
       <div className="modal-header"><span>Keyboard Shortcuts</span><span className="modal-close" onClick={closeModal}><Icon name="times" /></span></div>
       <div className="modal-body">
-        {SHORTCUTS.map(([k, d]) => <div key={k} className="shortcut-row"><kbd>{k}</kbd><span>{d}</span></div>)}
+        {SHORTCUTS.map((g) => (
+          <div key={g.group} className="shortcut-group">
+            <div className="shortcut-group-title">{g.group}</div>
+            {g.items.map(([label, combos]) => (
+              <div key={label} className="shortcut-row">
+                <span className="shortcut-label">{label}</span>
+                <span className="shortcut-keys">
+                  {combos.map((combo, ci) => (
+                    <span key={ci} className="shortcut-combo">
+                      {ci ? <span className="shortcut-or">or</span> : null}
+                      {combo.map((k) => <kbd key={k}>{k}</kbd>)}
+                    </span>
+                  ))}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
       </div>
     </div>
   )

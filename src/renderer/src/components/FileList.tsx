@@ -8,7 +8,7 @@ export const STATUS_ICON: Record<string, { icon: string; cls: string; label: str
   A: { icon: 'plus', cls: 'color-green', label: 'added' },
   '?': { icon: 'plus', cls: 'color-green', label: 'added' },
   D: { icon: 'minus', cls: 'color-red', label: 'deleted' },
-  R: { icon: 'swap', cls: 'color-blue', label: 'renamed' },
+  R: { icon: 'file', cls: 'color-blue', label: 'renamed' },
   C: { icon: 'copy', cls: 'color-blue', label: 'copied' },
   U: { icon: 'warning', cls: 'color-orange', label: 'conflicted' },
   N: { icon: 'file', cls: 'text-disabled', label: 'unchanged' }
@@ -20,7 +20,7 @@ export function StatusIcon({ status }: { status: string }) {
 }
 
 export function summarizeFiles(files: FileChange[]): Array<{ status: string; count: number }> {
-  const order = ['A', 'M', 'D', 'R']
+  const order = ['M', 'A', 'D', 'R']
   const map = new Map<string, number>()
   for (const f of files) {
     if (f.status === 'N') continue
@@ -73,6 +73,8 @@ function buildDirs(files: FileChange[]): Dir {
 
 export function FileList({ files, mode, sortDesc, activePath, selected = [], onOpen, onContext, onSelect, rowAction, onDoubleClick, collapsed }: Props) {
   const [closed, setClosed] = useState<Record<string, boolean>>({})
+  // tree mode, like the original: folders start closed; "Expand All" / "Collapse All" reset every folder
+  const [allOpen, setAllOpen] = useState(!(collapsed ?? true))
   const [anchor, setAnchor] = useState<string | null>(null)
   const sorted = useMemo(() => {
     const l = [...files].sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'base' }))
@@ -102,7 +104,6 @@ export function FileList({ files, mode, sortDesc, activePath, selected = [], onO
       key={f.path}
       className={`file-row${activePath === f.path ? ' active' : ''}${selected.includes(f.path) && selected.length > 1 ? ' selected' : ''}`}
       style={{ paddingLeft: 10 + depth * 16 }}
-      title={f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
       onClick={(e) => click(f, e)}
       onDoubleClick={() => onDoubleClick?.(f)}
       onContextMenu={(e) => { e.preventDefault(); onContext?.(f) }}
@@ -127,16 +128,22 @@ export function FileList({ files, mode, sortDesc, activePath, selected = [], onO
   }
 
   const tree = buildDirs(sorted)
+  const counts = (d: Dir): Array<[string, number]> => {
+    const m = new Map<string, number>()
+    const walk = (x: Dir) => { for (const f of x.files) if (f.status !== 'N') { const k = f.status === '?' || f.status === 'C' ? 'A' : f.status === 'T' ? 'M' : f.status; m.set(k, (m.get(k) ?? 0) + 1) } x.dirs.forEach(walk) }
+    walk(d)
+    return ['M', 'A', 'D', 'R', 'U'].filter((k) => m.has(k)).map((k) => [k, m.get(k)!])
+  }
   const render = (d: Dir, depth: number): ReactNode[] => {
     const dirs = [...d.dirs].sort((a, b) => a.name.localeCompare(b.name) * (sortDesc ? -1 : 1))
     return [
       ...dirs.flatMap((sub) => {
-        const isClosed = collapsed ? closed[sub.full] !== false : !!closed[sub.full]
+        const isClosed = closed[sub.full] ?? !allOpen
         return [
           <div key={'d:' + sub.full} className="file-row file-dir-row" style={{ paddingLeft: 10 + depth * 16 }} onClick={() => setClosed((c) => ({ ...c, [sub.full]: !isClosed }))}>
             <Icon name={isClosed ? 'chevron-right' : 'chevron-down'} className="file-dir-chevron" />
-            <Icon name={isClosed ? 'folder' : 'folder-open'} className="file-dir-icon" />
             <span className="file-name">{sub.name}</span>
+            <span className="file-dir-counts">{counts(sub).map(([k, n]) => <span key={k} className="file-dir-count"><StatusIcon status={k} />{n}</span>)}</span>
           </div>,
           ...(isClosed ? [] : render(sub, depth + 1))
         ]
@@ -144,7 +151,16 @@ export function FileList({ files, mode, sortDesc, activePath, selected = [], onO
       ...d.files.map((f) => row(f, depth, <span className="file-path"><span className="file-name">{f.path.split('/').pop()}</span></span>))
     ]
   }
-  return <div className="file-node-list">{render(tree, 0)}</div>
+  return (
+    <div className="file-node-list">
+      {tree.dirs.length ? (
+        <div className="file-tree-header">
+          <span className="btn-link" onClick={() => { setClosed({}); setAllOpen(!allOpen) }}>{allOpen ? 'Collapse All' : 'Expand All'}</span>
+        </div>
+      ) : null}
+      {render(tree, 0)}
+    </div>
+  )
 }
 
 export function FileListToolbar({ mode, setMode, sortDesc, setSortDesc, extra }: { mode: 'path' | 'tree'; setMode: (m: 'path' | 'tree') => void; sortDesc: boolean; setSortDesc: (v: boolean) => void; extra?: ReactNode }) {

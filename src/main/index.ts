@@ -1,16 +1,17 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, nativeImage, nativeTheme } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
-import { spawn } from 'node:child_process'
-import { watch, FSWatcher, existsSync } from 'node:fs'
+import { spawn, execFile } from 'node:child_process'
+import { watch, FSWatcher, existsSync, statSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import * as git from './git'
 import * as providers from './providers'
-import { setGitPath, findGit, READ_ONLY } from './gitcore'
-import { scanGitKraken } from './gitkraken'
+import { setGitPath, findGit, READ_ONLY, activityLog } from './gitcore'
+import { scanGitKraken, gitkrakenSettings } from './gitkraken'
 import { buildAppMenu, setMenuState } from './appmenu'
 import * as ex from './extras'
 import * as term from './terminal'
+import * as undo from './undo'
 import { getSettings, updateSettings, flushSettings, addRecent } from './settings'
 import type { Api } from '../shared/api'
 import type { MenuItemSpec } from '../shared/types'
@@ -19,6 +20,13 @@ import type { MenuItemSpec } from '../shared/types'
 if (process.env.SUPERGIT_USER_DATA) app.setPath('userData', process.env.SUPERGIT_USER_DATA)
 
 let win: BrowserWindow | null = null
+
+/** "Use local SSH agent" off + a private key: git runs ssh with that key only */
+function applySshSettings(): void {
+  const s = getSettings()
+  if (!s.sshUseAgent && s.sshPrivateKey) process.env.GIT_SSH_COMMAND = `ssh -i "${s.sshPrivateKey.replace(/\\/g, '/')}" -o IdentitiesOnly=yes`
+  else delete process.env.GIT_SSH_COMMAND
+}
 
 function createWindow(): void {
   const s = getSettings()
@@ -53,30 +61,23 @@ function createWindow(): void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Undo / redo of local operations
+// Undo / redo follow the reflog (see undo.ts); actions git does not log are journaled there.
 
-interface UndoEntry { label: string; undo: () => Promise<void>; redo: () => Promise<void> }
-const stacks = new Map<string, { undo: UndoEntry[]; redo: UndoEntry[] }>()
-function stackFor(p: string) {
-  const k = p.toLowerCase()
-  if (!stacks.has(k)) stacks.set(k, { undo: [], redo: [] })
-  return stacks.get(k)!
-}
-function record(p: string, e: UndoEntry) {
-  const s = stackFor(p)
-  s.undo.push(e)
-  if (s.undo.length > 50) s.undo.shift()
-  s.redo = []
-}
-/** Runs an op that may move HEAD and records an undo entry when it does. */
-async function trackHead<T extends { ok?: boolean }>(p: string, label: string, op: () => Promise<T>): Promise<T> {
+/** Runs an op that may move HEAD; keeps submodules in step when it did. */
+async function trackHead<T extends { ok?: boolean }>(p: string, op: () => Promise<T>): Promise<T> {
   const before = (await git.getHead(p)).sha
   const res = await op()
   const after = (await git.getHead(p)).sha
-  if (res.ok !== false && before && after && before !== after) {
-    record(p, { label, undo: () => git.resetKeep(p, before), redo: () => git.resetKeep(p, after) })
-    await syncSubmodules(p)
-  }
+  if (res.ok !== false && before && after && before !== after) await syncSubmodules(p)
+  return res
+}
+
+/** a finished rebase is journaled with the commit it started from, so Undo can restore it */
+async function trackRebase<T extends { ok?: boolean; conflicts?: unknown }>(p: string, op: () => Promise<T>): Promise<T> {
+  const before = (await git.getHead(p)).sha
+  const res = await trackHead(p, op)
+  const after = (await git.getHead(p)).sha
+  if (res.ok !== false && !res.conflicts && before && after && before !== after) await undo.addJournal(p, `rebase: [${before}]`)
   return res
 }
 
@@ -86,10 +87,6 @@ async function syncSubmodules(p: string): Promise<void> {
   await git.net(p, 'submodule', ['submodule', 'update', '--init', '--recursive'], { allowFail: true })
 }
 
-async function headRef(p: string): Promise<string> {
-  const h = await git.getHead(p)
-  return h.branch ?? h.sha
-}
 
 // ---------------------------------------------------------------------------------------------
 // Watchers
@@ -208,6 +205,7 @@ const api: Api = {
   async getSettings() { return getSettings() },
   async setSettings(patch) {
     if (patch.gitPath !== undefined) setGitPath(patch.gitPath)
+    if (patch.sshUseAgent !== undefined || patch.sshPrivateKey !== undefined) applySshSettings()
     return updateSettings(patch)
   },
   async addRecent(p, name) { addRecent(p, name) },
@@ -219,7 +217,35 @@ const api: Api = {
   providerDisconnect: (p) => providers.disconnect(p),
   providerRepos: (p) => providers.listRepos(p),
   gitkrakenScan: () => scanGitKraken(),
+  gitkrakenSettings: () => gitkrakenSettings(),
+  async takeStartupFolder() { const d = startupFolder; startupFolder = null; return d },
+  /** set by the installer's "Import from GitKraken" option; read once */
+  async takeGitKrakenImportFlag() {
+    const f = path.join(app.getPath('userData'), 'import-gitkraken.flag')
+    if (!existsSync(f)) return false
+    try { rmSync(f, { force: true }) } catch { /* ignore */ }
+    return true
+  },
   async setMenuState(st) { setMenuState(win, st) },
+  async activityLog() { return activityLog() },
+  async maintenance(p) { await git.g(p, ['gc', '--quiet']) },
+  async sparseCheckout(p) {
+    const on = (await git.g(p, ['config', '--get', 'core.sparseCheckout'], { allowFail: true })).stdout.trim() === 'true'
+    if (!on) return { enabled: false, patterns: [] }
+    const r = await git.g(p, ['sparse-checkout', 'list'], { allowFail: true })
+    return { enabled: true, patterns: r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) }
+  },
+  async sparseCheckoutSet(p, patterns) {
+    if (patterns === null) await git.g(p, ['sparse-checkout', 'disable'])
+    else await git.g(p, ['sparse-checkout', 'set', ...patterns])
+  },
+  async gpgPublicKey(key) {
+    const r = await git.g(os.homedir(), ['config', '--global', '--get', 'gpg.program'], { allowFail: true })
+    const gpg = r.stdout.trim() || 'gpg'
+    return new Promise((resolve, reject) => {
+      execFile(gpg, ['--armor', '--export', key], { windowsHide: true }, (err, out) => (err ? reject(err) : resolve(out)))
+    })
+  },
   async showAbout() {
     const r = await git.g(os.homedir(), ['--version'], { allowFail: true })
     await dialog.showMessageBox(win!, { type: 'info', title: `About ${app.getName()}`, message: `${app.getName()} ${app.getVersion()}`, detail: `A local-only Git client.
@@ -253,7 +279,7 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
     return git.getConflictSides(p, info!.gitDir, file)
   },
   blame: (p, file, sha) => git.getBlame(p, file, sha),
-  fileHistory: (p, file) => git.getFileHistory(p, file),
+  fileHistory: (p, file, from) => git.getFileHistory(p, file, from),
   searchCommits: (p, q) => git.searchCommits(p, q),
   lastCommitMessage: (p) => git.getLastCommitMessage(p),
   isAncestor: (p, a, b) => git.isAncestor(p, a, b),
@@ -262,51 +288,41 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   stageAll: (p) => git.stageAll(p),
   async unstage(p, paths) { await git.unstage(p, paths, (await git.getHead(p)).unborn) },
   async unstageAll(p) { await git.unstageAll(p, (await git.getHead(p)).unborn) },
-  discardFiles: (p, files) => git.discardFiles(p, files),
-  async discardAll(p) { await git.discardAll(p, (await git.getHead(p)).unborn) },
-  applyHunk: (p, ctx, h, lines, action) => git.applyHunk(p, ctx, h, lines, action),
-  async commit(p, message, amend, opts) {
-    const before = (await git.getHead(p)).sha
-    await git.commit(p, message, amend, opts)
-    const after = (await git.getHead(p)).sha
-    if (before) record(p, {
-      label: amend ? 'Amend' : 'Commit',
-      undo: async () => { await git.reset(p, before, 'soft') },
-      redo: async () => { await git.reset(p, after, 'soft') }
-    })
+  async discardFiles(p, files) {
+    // what is thrown away is kept in a commit so Undo can bring it back
+    const oid = await undo.snapshotPaths(p, files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path]))).catch(() => null)
+    await git.discardFiles(p, files)
+    if (oid) await undo.addJournal(p, `discard: [${oid}]`)
   },
+  async discardAll(p) {
+    const unborn = (await git.getHead(p)).unborn
+    const oid = unborn ? null : await undo.snapshotPaths(p, null).catch(() => null)
+    await git.discardAll(p, unborn)
+    if (oid) await undo.addJournal(p, `discard: [${oid}]`)
+  },
+  applyHunk: (p, ctx, h, lines, action) => git.applyHunk(p, ctx, h, lines, action),
+  commit: (p, message, amend, opts) => git.commit(p, message, amend, opts),
   resolveConflict: (p, file, content) => git.resolveConflict(p, file, content),
   writeFile: (p, file, content) => git.writeWorkingFile(p, file, content),
   resolveWithSide: (p, file, side) => git.resolveWithSide(p, file, side),
 
   async checkout(p, target) {
-    const from = await headRef(p)
-    await git.checkout(p, target)
-    const to = await headRef(p)
-    record(p, { label: 'Checkout', undo: () => git.checkout(p, from), redo: () => git.checkout(p, to) })
+    const stashed = await git.checkoutAutoStash(p, target)
     await syncSubmodules(p)
+    return stashed
   },
   restoreFile: (p, sha, file) => git.restoreFile(p, sha, file),
-  async checkoutRemote(p, remoteShort, localExists) {
-    const from = await headRef(p)
-    const local = await git.checkoutRemote(p, remoteShort, localExists)
-    record(p, { label: 'Checkout', undo: () => git.checkout(p, from), redo: () => git.checkout(p, local) })
+  async checkoutRemote(p, remoteShort, localExists, opts) {
+    const local = await git.checkoutRemote(p, remoteShort, localExists, opts)
     await syncSubmodules(p)
     return local
   },
-  async createBranch(p, name, at, doCheckout) {
-    const from = await headRef(p)
-    await git.createBranch(p, name, at, doCheckout)
-    record(p, {
-      label: 'Create Branch',
-      undo: async () => { if (doCheckout) await git.checkout(p, from); await git.deleteBranch(p, name, true) },
-      redo: () => git.createBranch(p, name, at, doCheckout)
-    })
-  },
+  createBranch: (p, name, at, doCheckout) => git.createBranch(p, name, at, doCheckout),
   async deleteBranch(p, name, force) {
     const sha = await git.revParse(p, `refs/heads/${name}`)
+    const upstream = (await git.tryOut(p, ['for-each-ref', '--format=%(upstream:short)', `refs/heads/${name}`]))?.trim()
     await git.deleteBranch(p, name, force)
-    if (sha) record(p, { label: 'Delete Branch', undo: () => git.createBranch(p, name, sha, false), redo: () => git.deleteBranch(p, name, true) })
+    if (sha) await undo.addJournal(p, ['delete_branch:', name, upstream, `[${sha}]`].filter(Boolean).join(' '))
   },
   deleteRemoteBranch: (p, remote, branch) => git.deleteRemoteBranch(p, remote, branch),
   renameBranch: (p, o, n) => git.renameBranch(p, o, n),
@@ -315,27 +331,39 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   createTag: (p, n, at, m) => git.createTag(p, n, at, m),
   deleteTag: (p, n) => git.deleteTag(p, n),
   deleteRemoteTag: (p, r, n) => git.deleteRemoteTag(p, r, n),
+  moveTag: (p, n, to) => git.moveTag(p, n, to),
+  remoteTags: (p) => git.remoteTags(p),
   pushTag: (p, r, n) => git.pushTag(p, r, n),
   addRemote: (p, n, u) => git.addRemote(p, n, u),
-  removeRemote: (p, n) => git.removeRemote(p, n),
+  async removeRemote(p, n) {
+    const pullUrl = (await git.tryOut(p, ['remote', 'get-url', n]))?.trim() ?? ''
+    const pushUrl = (await git.tryOut(p, ['remote', 'get-url', '--push', n]))?.trim() || pullUrl
+    await git.removeRemote(p, n)
+    if (pullUrl) await undo.addJournal(p, `remove_remote: ${n} ${JSON.stringify({ pullUrl, pushUrl })}`)
+  },
   editRemote: (p, o, n, f, pu) => git.editRemote(p, o, n, f, pu),
 
-  merge: (p, ref, opts) => trackHead(p, 'Merge', () => git.merge(p, ref, opts)),
-  rebase: (p, onto) => trackHead(p, 'Rebase', () => git.rebase(p, onto)),
-  interactiveRebase: (p, base, items) => trackHead(p, 'Rebase', () => git.interactiveRebase(p, base, items)),
-  cherryPick: (p, shas) => trackHead(p, 'Cherry pick', () => git.cherryPick(p, shas)),
-  revert: (p, sha, isMerge) => trackHead(p, 'Revert', () => git.revert(p, sha, isMerge)),
+  merge: (p, ref, opts) => trackHead(p, () => git.merge(p, ref, opts)),
+  rebase: (p, onto) => trackRebase(p, () => git.rebase(p, onto)),
+  interactiveRebase: (p, base, items) => trackRebase(p, () => git.interactiveRebase(p, base, items)),
+  cherryPick: (p, shas, noCommit) => trackHead(p, () => git.cherryPick(p, shas, noCommit)),
+  revert: (p, sha, isMerge, noCommit) => trackHead(p, () => git.revert(p, sha, isMerge, noCommit)),
   async reset(p, sha, mode) {
-    const before = (await git.getHead(p)).sha
+    // a hard reset over local changes keeps them in a commit named in the reflog, so Undo restores them too
+    const saved = mode === 'hard' ? (await git.tryOut(p, ['stash', 'create']))?.trim() : undefined
     const r = await git.reset(p, sha, mode)
-    if (r.ok && before) record(p, {
-      label: 'Reset',
-      undo: async () => { await git.reset(p, before, mode) },
-      redo: async () => { await git.reset(p, sha, mode) }
-    })
+    if (r.ok && saved) await undo.rewriteLastReflogMessage(p, `reset: moving to ${sha} [${saved}]`)
     return r
   },
-  continueOp: (p, kind, msg) => trackHead(p, kind === 'merge' ? 'Merge' : kind === 'rebase' ? 'Rebase' : kind === 'cherry-pick' ? 'Cherry pick' : 'Revert', () => git.continueOp(p, kind, msg)),
+  async continueOp(p, kind, msg) {
+    const res = await trackHead(p, () => git.continueOp(p, kind, msg))
+    // a rebase finished after resolving conflicts: journal it from where it started
+    if (kind === 'rebase' && res.ok !== false && !res.conflicts) {
+      const orig = (await git.tryOut(p, ['rev-parse', '-q', '--verify', 'ORIG_HEAD']))?.trim()
+      if (orig) await undo.addJournal(p, `rebase: [${orig}]`)
+    }
+    return res
+  },
   abortOp: (p, kind) => git.abortOp(p, kind),
   skipOp: (p, kind) => git.skipOp(p, kind),
 
@@ -349,9 +377,11 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   stashPop: (p, i) => git.stashPop(p, i),
   stashDrop: (p, i) => git.stashDrop(p, i),
 
+  validateWorktree: (p, o) => git.validateWorktree(p, o),
   addWorktree: (p, d, o) => git.addWorktree(p, d, o),
   removeWorktree: (p, d, f) => git.removeWorktree(p, d, f),
   pruneWorktrees: (p) => git.pruneWorktrees(p),
+  lockWorktree: (p, d, r) => git.lockWorktree(p, d, r),
 
   fetchAll: (p, quiet) => git.fetchAll(p, getSettings().autoPrune, !!quiet),
   fetchRemote: (p, r) => git.fetchRemote(p, r, getSettings().autoPrune),
@@ -372,7 +402,7 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   async gitConfigUnset(key, repo) { await git.g(repo ?? os.homedir(), ['config', ...(repo ? ['--local'] : ['--global']), '--unset', key], { allowFail: true }) },
   gitflowInit: (p, cfg) => ex.gitflowInit(p, cfg),
   gitflowStart: (p, t, n) => ex.gitflowStart(p, t, n),
-  gitflowFinish: (p, t, n, o) => trackHead(p, 'Gitflow finish', () => ex.gitflowFinish(p, t, n, o)),
+  gitflowFinish: (p, t, n, o) => trackHead(p, () => ex.gitflowFinish(p, t, n, o)),
   lfsInfo: (p) => ex.lfsInfo(p),
   lfsInstall: (p) => ex.lfsInstall(p),
   lfsTrack: (p, pat) => ex.lfsTrack(p, pat),
@@ -387,8 +417,9 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
     return r.canceled ? null : r.filePaths[0]
   },
   createPatch: (p, shas, file) => ex.createPatch(p, shas, file),
-  applyPatch: (p, file, asCommits) => trackHead(p, 'Apply patch', () => ex.applyPatch(p, file, asCommits)),
+  applyPatch: (p, file, asCommits) => trackHead(p, () => ex.applyPatch(p, file, asCommits)),
   submoduleUpdate: (p, s) => ex.submoduleUpdate(p, s),
+  deleteSubmodule: (p, sub, commit) => git.deleteSubmodule(p, sub, commit),
   submoduleAdd: (p, u, s) => ex.submoduleAdd(p, u, s),
   submoduleSync: (p) => ex.submoduleSync(p),
   openInEditor: (p, f) => ex.openInEditor(p, f, getSettings().externalEditor),
@@ -407,26 +438,9 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   async termResize(id, cols, rows) { term.resizeTerminal(id, cols, rows) },
   async termKill(id) { term.killTerminal(id) },
 
-  async undo(p) {
-    const s = stackFor(p)
-    const e = s.undo.pop()
-    if (!e) return null
-    await e.undo()
-    s.redo.push(e)
-    return e.label
-  },
-  async redo(p) {
-    const s = stackFor(p)
-    const e = s.redo.pop()
-    if (!e) return null
-    await e.redo()
-    s.undo.push(e)
-    return e.label
-  },
-  async undoState(p) {
-    const s = stackFor(p)
-    return { undo: s.undo.at(-1)?.label ?? null, redo: s.redo.at(-1)?.label ?? null }
-  }
+  async undo(p, opts) { const r = await undo.apply(p, 'undo', opts); if (r !== null) await syncSubmodules(p); return r },
+  async redo(p, opts) { const r = await undo.apply(p, 'redo', opts); if (r !== null) await syncSubmodules(p); return r },
+  undoState: (p) => undo.preview(p)
 }
 
 ipcMain.handle('api', async (_e, method: keyof Api, args: unknown[]) => {
@@ -437,6 +451,7 @@ ipcMain.handle('api', async (_e, method: keyof Api, args: unknown[]) => {
 
 git.setAuthConfigProvider(providers.gitAuthConfig)
 setGitPath(getSettings().gitPath)
+applySshSettings()
 git.setIdentityProvider(async (cwd) => {
   const s = getSettings()
   const prof = s.profiles.find((x) => x.id === s.activeProfile)
@@ -451,10 +466,24 @@ git.setIdentityProvider(async (cwd) => {
 })
 git.setProgressSink((repo, op, text) => win?.webContents.send('progress', { repo, op, text }))
 
+/** a folder passed on the command line ("Open with SuperGit" in Explorer) */
+function folderArg(argv: string[]): string | null {
+  for (const a of argv.slice(1)) {
+    if (!a || a.startsWith('-')) continue
+    try { if (statSync(a).isDirectory()) return path.resolve(a) } catch { /* not a path */ }
+  }
+  return null
+}
+let startupFolder: string | null = folderArg(process.argv)
+
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) app.quit()
 else {
-  app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus() } })
+  app.on('second-instance', (_e, argv) => {
+    if (win) { if (win.isMinimized()) win.restore(); win.focus() }
+    const dir = folderArg(argv)
+    if (dir) win?.webContents.send('command', `open:${dir}`)
+  })
   app.whenReady().then(() => {
     app.setAppUserModelId('dev.supergit.app')
     // native context menus / dialogs follow the app theme (dark menus in the dark theme, like the original)

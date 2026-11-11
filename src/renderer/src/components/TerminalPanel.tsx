@@ -15,13 +15,91 @@ function termTheme(light: boolean) {
 
 const SHELL_LABEL: Record<string, string> = { powershell: 'PowerShell', pwsh: 'pwsh', cmd: 'cmd', gitbash: 'Git Bash' }
 
+interface TermTab { key: number; title: string; /** bumped by Restart: a new shell in the same tab */ gen: number }
+let nextKey = 1
+
+/** Terminal panel with tabs, like the original (Ctrl+Shift+N new tab, Ctrl+Shift+W close, Ctrl+PageUp/PageDown, Ctrl+Shift+1…9). */
 export function TerminalPanel({ path }: { path: string }) {
-  const host = useRef<HTMLDivElement>(null)
   const height = useStore((s) => s.settings!.terminalHeight)
   const shell = useStore((s) => s.settings!.terminalShell)
+  const dim = useStore((s) => s.settings!.terminalDimUnfocused)
+  const [focused, setFocused] = useState(true)
+  const [tabs, setTabs] = useState<TermTab[]>(() => [{ key: nextKey++, title: SHELL_LABEL[shell] ?? shell, gen: 0 }])
+  const [active, setActive] = useState(tabs[0].key)
+
+  const add = () => { const t = { key: nextKey++, title: SHELL_LABEL[shell] ?? shell, gen: 0 }; setTabs((l) => [...l, t]); setActive(t.key) }
+  const close = (key: number) => {
+    setTabs((l) => {
+      const rest = l.filter((t) => t.key !== key)
+      if (!rest.length) { A2.toggleTerminal(path, false); return l }
+      if (key === active) setActive(rest[Math.max(0, l.findIndex((t) => t.key === key) - 1)].key)
+      return rest
+    })
+  }
+  // commands from the menu / shortcuts
+  useEffect(() => {
+    const on = (e: Event) => {
+      const cmd = (e as CustomEvent<string>).detail
+      setTabs((l) => {
+        const i = l.findIndex((t) => t.key === active)
+        if (cmd === 'new') add()
+        else if (cmd === 'close') close(active)
+        else if (cmd === 'next' && l.length) setActive(l[(i + 1) % l.length].key)
+        else if (cmd === 'prev' && l.length) setActive(l[(i - 1 + l.length) % l.length].key)
+        else if (/^\d$/.test(cmd) && l[Number(cmd) - 1]) setActive(l[Number(cmd) - 1].key)
+        return l
+      })
+    }
+    window.addEventListener('sg-terminal', on)
+    return () => window.removeEventListener('sg-terminal', on)
+  }, [active]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault()
+    let last = e.clientY
+    const move = (ev: MouseEvent) => {
+      const dy = last - ev.clientY
+      last = ev.clientY
+      const cur = useStore.getState().settings!.terminalHeight
+      useStore.setState((s) => ({ settings: { ...s.settings!, terminalHeight: Math.max(120, Math.min(window.innerHeight - 250, cur + dy)) } }))
+    }
+    const up = () => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      void api.setSettings({ terminalHeight: useStore.getState().settings!.terminalHeight })
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  return (
+    <div className={`terminal-panel${dim && !focused ? ' dimmed' : ''}`} style={{ height }} onFocusCapture={() => setFocused(true)} onBlurCapture={() => setFocused(false)}>
+      <div className="terminal-resize" onMouseDown={startResize} />
+      <div className="terminal-header">
+        <div className="terminal-tabs">
+          {tabs.map((t, i) => (
+            <span key={t.key} className={`terminal-tab${t.key === active ? ' active' : ''}`} title={`${t.title} · ${path} (Ctrl+Shift+${i + 1})`} onClick={() => setActive(t.key)}>
+              <Icon name="terminal" /> {t.title}
+              <span className="terminal-tab-close" title="Close terminal tab (Ctrl+Shift+W)" onClick={(e) => { e.stopPropagation(); close(t.key) }}><Icon name="times-thin" /></span>
+            </span>
+          ))}
+          <span className="terminal-btn" title="New terminal tab (Ctrl+Shift+N)" onClick={add}><Icon name="plus" /></span>
+        </div>
+        <span className="grow" />
+        <span className="terminal-btn" title="Restart this terminal" onClick={() => setTabs((l) => l.map((t) => (t.key === active ? { ...t, gen: t.gen + 1 } : t)))}><Icon name="refresh" /></span>
+        <span className="terminal-btn" title="Open external terminal" onClick={() => api.openTerminal(path)}><Icon name="external" /></span>
+        <span className="terminal-btn" title="Close terminal (Ctrl+`)" onClick={() => A2.toggleTerminal(path, false)}><Icon name="times" /></span>
+      </div>
+      {tabs.map((t) => <TermSession key={`${t.key}:${t.gen}`} path={path} visible={t.key === active} />)}
+    </div>
+  )
+}
+
+function TermSession({ path, visible }: { path: string; visible: boolean }) {
+  const host = useRef<HTMLDivElement>(null)
+  const shell = useStore((s) => s.settings!.terminalShell)
   const theme = useStore((s) => s.settings!.theme)
-  const [session, setSession] = useState(0)
-  const [exited, setExited] = useState(false)
+  const [, setExited] = useState(false)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
 
@@ -77,7 +155,14 @@ export function TerminalPanel({ path }: { path: string }) {
       if (id >= 0) void api.termKill(id)
       term.dispose()
     }
-  }, [path, session, shell])
+  }, [path, shell])
+
+  // a tab that becomes visible is fitted to the panel and focused
+  useEffect(() => {
+    if (!visible) return
+    try { fitRef.current?.fit() } catch { /* hidden */ }
+    termRef.current?.focus()
+  }, [visible])
 
   useEffect(() => { if (termRef.current) termRef.current.options.theme = termTheme(theme === 'light') }, [theme])
 
@@ -86,8 +171,6 @@ export function TerminalPanel({ path }: { path: string }) {
   const fontSize = useStore((s) => s.settings!.terminalFontSize)
   const lineHeight = useStore((s) => s.settings!.terminalLineHeight)
   const cursor = useStore((s) => s.settings!.terminalCursor)
-  const dim = useStore((s) => s.settings!.terminalDimUnfocused)
-  const [focused, setFocused] = useState(true)
   useEffect(() => {
     const t = termRef.current
     if (!t) return
@@ -98,38 +181,5 @@ export function TerminalPanel({ path }: { path: string }) {
     try { fitRef.current?.fit() } catch { /* hidden */ }
   }, [font, fontSize, lineHeight, cursor])
 
-  const startResize = (e: React.MouseEvent) => {
-    e.preventDefault()
-    let last = e.clientY
-    const move = (ev: MouseEvent) => {
-      const dy = last - ev.clientY
-      last = ev.clientY
-      const cur = useStore.getState().settings!.terminalHeight
-      useStore.setState((s) => ({ settings: { ...s.settings!, terminalHeight: Math.max(120, Math.min(window.innerHeight - 250, cur + dy)) } }))
-    }
-    const up = () => {
-      window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', up)
-      void api.setSettings({ terminalHeight: useStore.getState().settings!.terminalHeight })
-    }
-    window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
-  }
-
-  return (
-    <div className={`terminal-panel${dim && !focused ? ' dimmed' : ''}`} style={{ height }} onFocusCapture={() => setFocused(true)} onBlurCapture={() => setFocused(false)}>
-      <div className="terminal-resize" onMouseDown={startResize} />
-      <div className="terminal-header">
-        <Icon name="terminal" />
-        <span className="terminal-title">TERMINAL</span>
-        <span className="text-secondary">{SHELL_LABEL[shell] ?? shell} · {path}</span>
-        <span className="grow" />
-        {exited ? <button className="btn btn-xs btn-default" onClick={() => setSession((n) => n + 1)}>Restart</button> : null}
-        <span className="terminal-btn" title="New session" onClick={() => setSession((n) => n + 1)}><Icon name="plus" /></span>
-        <span className="terminal-btn" title="Open external terminal" onClick={() => api.openTerminal(path)}><Icon name="external" /></span>
-        <span className="terminal-btn" title="Close terminal (Ctrl+`)" onClick={() => A2.toggleTerminal(path, false)}><Icon name="times" /></span>
-      </div>
-      <div className="terminal-host" ref={host} />
-    </div>
-  )
+  return <div className="terminal-host" ref={host} style={visible ? undefined : { display: 'none' }} />
 }

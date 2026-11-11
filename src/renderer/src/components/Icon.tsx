@@ -1,26 +1,27 @@
 import type { CSSProperties, ReactElement } from 'react'
 import type { IconDefinition } from '@fortawesome/fontawesome-svg-core'
 import {
-  faFolder as farFolder, faBell, faClock, faKeyboard, faCopy, faFile, faFolderOpen as farFolderOpen, faEye, faEyeSlash, faSquare as farSquare
+  faFolder as farFolder, faTrashCan as farTrashCan, faBell, faClock, faKeyboard, faCopy, faFile, faFolderOpen as farFolderOpen, faEye, faEyeSlash, faSquare as farSquare,
+  faCircle as farCircle, faCircleDot as farCircleDot
 } from '@fortawesome/free-regular-svg-icons'
 import {
   faXmark, faPlus, faChevronDown, faChevronRight, faChevronUp, faChevronLeft, faGear, faCaretDown, faMagnifyingGlass, faCodeBranch, faRotateLeft,
   faRotateRight, faTerminal, faCircleChevronLeft, faCircleChevronRight, faList, faLaptop, faCloud, faTag, faCheck, faPencil, faArrowUpAZ,
-  faBars, faFolderTree, faTree, faTrash, faArrowUp, faArrowDown, faTriangleExclamation, faMinus, faPen, faArrowRightArrowLeft, faEllipsisVertical,
+  faBars, faFolderTree, faFilter, faTree, faTrash, faArrowUp, faArrowDown, faTriangleExclamation, faMinus, faPen, faArrowRightArrowLeft, faEllipsisVertical,
   faCodeMerge, faCodeCommit, faArrowsRotate, faCircleInfo, faArrowUpRightFromSquare, faFloppyDisk, faParagraph, faAlignLeft, faHouse, faCodeCompare,
   faInbox, faCircleCheck, faCircleXmark, faSpinner, faGripLines, faFileLines, faClockRotateLeft, faUser, faFolderOpen, faFolderPlus, faDownload,
-  faCompress, faExpand, faLink, faCircle, faLock, faServer, faKey, faRightFromBracket
+  faCompress, faExpand, faLink, faCircle, faLock, faServer, faKey, faRightFromBracket, faCaretUp
 } from '@fortawesome/free-solid-svg-icons'
 import { faGithub, faGitlab, faBitbucket, faMicrosoft } from '@fortawesome/free-brands-svg-icons'
 
 const FA: Record<string, IconDefinition> = {
   folder: farFolder, 'folder-open': farFolderOpen, 'folder-solid-open': faFolderOpen, 'folder-plus': faFolderPlus, bell: faBell, clock: faClock,
   keyboard: faKeyboard, copy: faCopy, file: faFile, 'file-lines': faFileLines, times: faXmark, plus: faPlus, 'chevron-down': faChevronDown,
-  'chevron-right': faChevronRight, 'chevron-up': faChevronUp, 'chevron-left': faChevronLeft, cog: faGear, 'caret-down': faCaretDown,
+  'chevron-right': faChevronRight, 'chevron-up': faChevronUp, 'chevron-left': faChevronLeft, cog: faGear, 'caret-down': faCaretDown, 'caret-up': faCaretUp, 'circle-o': farCircle, 'dot-circle-o': farCircleDot,
   search: faMagnifyingGlass, 'code-branch': faCodeBranch, undo: faRotateLeft, redo: faRotateRight, terminal: faTerminal,
   'chevron-circle-left': faCircleChevronLeft, 'chevron-circle-right': faCircleChevronRight, list: faList, laptop: faLaptop, cloud: faCloud,
-  tag: faTag, check: faCheck, pencil: faPencil, 'sort-alpha': faArrowUpAZ, bars: faBars, 'folder-tree': faFolderTree, tree: faTree,
-  trash: faTrash, 'arrow-up': faArrowUp, 'arrow-down': faArrowDown, warning: faTriangleExclamation, minus: faMinus, pen: faPen,
+  tag: faTag, check: faCheck, pencil: faPencil, 'sort-alpha': faArrowUpAZ, bars: faBars, 'folder-tree': faFolderTree, filter: faFilter, tree: faTree,
+  trash: faTrash, 'trash-o': farTrashCan, 'arrow-up': faArrowUp, 'arrow-down': faArrowDown, warning: faTriangleExclamation, minus: faMinus, pen: faPen,
   swap: faArrowRightArrowLeft, 'ellipsis-v': faEllipsisVertical, merge: faCodeMerge, commit: faCodeCommit, refresh: faArrowsRotate,
   info: faCircleInfo, external: faArrowUpRightFromSquare, save: faFloppyDisk, paragraph: faParagraph, 'align-left': faAlignLeft,
   house: faHouse, compare: faCodeCompare, inbox: faInbox, 'check-circle': faCircleCheck, 'x-circle': faCircleXmark, spinner: faSpinner,
@@ -31,6 +32,8 @@ const FA: Record<string, IconDefinition> = {
 
 /** Hand-drawn glyphs for icons that only exist in commercial icon sets. Drawn on a 16x16 grid with strokes. */
 const CUSTOM: Record<string, ReactElement> = {
+  // outline gear (preferences), like the original's regular-weight cog
+  'cog-o': <><circle cx="8" cy="8" r="2.2" /><path d="M6.9 1.5h2.2l.4 1.8 1.3.6 1.6-1 1.6 1.6-1 1.6.6 1.3 1.8.4v2.2l-1.8.4-.6 1.3 1 1.6-1.6 1.6-1.6-1-1.3.6-.4 1.8H6.9l-.4-1.8-1.3-.6-1.6 1-1.6-1.6 1-1.6-.6-1.3-1.8-.4V6.9l1.8-.4.6-1.3-1-1.6 1.6-1.6 1.6 1 1.3-.6z" /></>,
   // thin × (tab close), the weight of the original's regular icon
   'times-thin': <path d="M4 4l8 8M12 4l-8 8" />,
   // outline tray (stashes), conifer (worktrees) and house (the main worktree)

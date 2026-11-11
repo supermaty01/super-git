@@ -84,8 +84,13 @@ export function RepoManagement() {
           return row(t.name, t.path,
             s ? <><span className="rm-branch"><Icon name="code-branch" /> {s.head.branch ?? s.head.sha.slice(0, 7)}</span>{n ? <span className="rm-wip"><Icon name="pencil" className="color-orange" /> {n}</span> : null}</> : null,
             <span className="rm-action" title="Close tab" onClick={() => A.closeTab(t.id)}><Icon name="times" /></span>)
-        }), openTabs.length ? <span className="rm-link" onClick={async () => { for (const t of tabs) await A.closeTab(t.id) }}><Icon name="times" /> Close all tabs</span> : null)}
-        {section('fav', 'Favorites', favorites.filter((p) => match(p, p)).length, favorites.filter((p) => match(p, p)).map((p) => row(p.split(/[\\/]/).pop() ?? p, p)))}
+        }), openTabs.length ? <>
+          <span className="rm-link" title="Fetch every open repository" onClick={() => void A2.fetchAllRepos(tabs.map((t) => t.path))}><Icon name="refresh" /> Fetch all</span>
+          <span className="rm-link" title="Pull every open repository" onClick={() => void A2.pullAllRepos(tabs.map((t) => t.path))}><Icon name="pull" /> Pull all</span>
+          <span className="rm-link" onClick={async () => { for (const t of tabs) await A.closeTab(t.id) }}><Icon name="times" /> Close all tabs</span>
+        </> : null)}
+        {section('fav', 'Favorites', favorites.filter((p) => match(p, p)).length, favorites.filter((p) => match(p, p)).map((p) => row(p.split(/[\\/]/).pop() ?? p, p)),
+          favorites.length ? <span className="rm-link" title="Open every favorite in a tab" onClick={async () => { for (const f of favorites) await A.openRepo(f) }}><Icon name="external" /> Open all</span> : null)}
         {section('recent', 'Recent repositories', recent.length, recent.map((r) => row(r.name, r.path, <span className="text-secondary">{relTime(r.lastOpened)}</span>,
           <span className="rm-action" title="Remove from list" onClick={() => removeRecent(r.path)}><Icon name="times" /></span>)),
         recent.length ? <span className="rm-link" onClick={() => { setState((s) => ({ settings: { ...s.settings!, recent: [] } })); void api.setSettings({ recent: [] }) }}><Icon name="times" /> Remove all</span> : null)}

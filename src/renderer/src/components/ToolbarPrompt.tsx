@@ -11,6 +11,7 @@ export function ToolbarPrompt() {
 function PromptBar({ p }: { p: PromptSpec }) {
   const [value, setValue] = useState(p.kind === 'input' ? p.value ?? '' : p.kind === 'upstream' ? '' : '')
   const [remote, setRemote] = useState(p.kind === 'upstream' ? p.remote : '')
+  const [noAsk, setNoAsk] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -23,7 +24,7 @@ function PromptBar({ p }: { p: PromptSpec }) {
 
   const submit = () => {
     if (p.kind === 'input') {
-      if (!value.trim() && !p.extraButtons) return
+      if (!value.trim() && (!p.extraButtons || p.requireValue)) return
       closePrompt()
       void p.onSubmit(value)
     } else if (p.kind === 'upstream') {
@@ -58,17 +59,20 @@ function PromptBar({ p }: { p: PromptSpec }) {
         ) : null}
         {p.kind === 'confirm' ? (
           p.buttons.map((b, i) => (
-            <button key={b.label} autoFocus={i === 0} className={`btn btn-xs prompt-btn btn-${b.style ?? 'default'}`} onClick={() => { closePrompt(); void b.run() }}>{b.label}</button>
+            <button key={b.label} autoFocus={i === 0} className={`btn btn-xs prompt-btn btn-${b.style ?? 'default'}`} onClick={() => { closePrompt(); p.dontAskAgain?.(noAsk); void b.run() }}>{b.label}</button>
           ))
         ) : (
           <>
-            <button className="btn btn-xs prompt-btn btn-success" onClick={submit}>{p.kind === 'input' && p.submitLabel ? p.submitLabel : 'Submit'}</button>
+            <button className="btn btn-xs prompt-btn btn-success" disabled={p.kind === 'input' && p.requireValue && !value.trim()} onClick={submit}>{p.kind === 'input' && p.submitLabel ? p.submitLabel : 'Submit'}</button>
             {p.kind === 'input' && p.extraButtons ? p.extraButtons.map((b) => (
               <button key={b.label} className={`btn btn-xs prompt-btn btn-${b.style ?? 'default'}`} onClick={() => { closePrompt(); void b.run() }}>{b.label}</button>
             )) : null}
           </>
         )}
         <button className="btn btn-xs prompt-btn btn-default" onClick={closePrompt}>Cancel</button>
+        {p.kind === 'confirm' && p.dontAskAgain ? (
+          <label className="prompt-check"><input type="checkbox" checked={noAsk} onChange={(e) => setNoAsk(e.target.checked)} /> Don't ask again</label>
+        ) : null}
       </div>
     </div>
   )

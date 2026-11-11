@@ -46,11 +46,22 @@ export function TooltipLayer() {
       }, 450)
     }
     const onDown = () => clear()
+    // the element under the tooltip can disappear or stop being hovered without any mouse event
+    // (re-render after a click, keyboard shortcut): drop the tooltip then too
+    const watch = window.setInterval(() => {
+      const el = current.current
+      if (el && (!el.isConnected || !el.matches(':hover'))) clear()
+    }, 300)
+    document.addEventListener('click', onDown, true)
+    document.addEventListener('keydown', onDown, true)
     document.addEventListener('mouseover', onOver, true)
     document.addEventListener('mousedown', onDown, true)
     document.addEventListener('wheel', onDown, { capture: true, passive: true })
     window.addEventListener('blur', onDown)
     return () => {
+      window.clearInterval(watch)
+      document.removeEventListener('click', onDown, true)
+      document.removeEventListener('keydown', onDown, true)
       document.removeEventListener('mouseover', onOver, true)
       document.removeEventListener('mousedown', onDown, true)
       document.removeEventListener('wheel', onDown, true)

@@ -82,6 +82,8 @@ interface RowProps {
   hidden?: boolean
   onEye?: () => void
   right?: ReactNode
+  /** replaces the lead column content (worktree lock) */
+  lead?: ReactNode
   onMenu?: (e: RME) => void
   title?: string
   onClick?: () => void
@@ -101,8 +103,8 @@ function Row(p: RowProps) {
       {...(p.extra ?? {})}
     >
       <span className="lp-lead">
-        {p.current && !p.noCheck ? <span className="lp-current-badge"><Icon name="check" /></span> : p.onEye ? (
-          <span className={`lp-eye${p.hidden ? ' always' : ''}`} title={p.hidden ? 'Show' : 'Hide'} onClick={(e) => { e.stopPropagation(); p.onEye!() }}>
+        {p.lead ? p.lead : p.current && !p.noCheck ? <span className="lp-current-badge"><Icon name="check" /></span> : p.onEye ? (
+          <span className={`lp-eye${p.hidden ? ' always' : ''}`} title={p.hidden ? 'Show in the graph' : 'Hide in the graph'} onClick={(e) => { e.stopPropagation(); p.onEye!() }}>
             <Icon name={p.hidden ? 'eye-slash' : 'eye'} />
           </span>
         ) : null}
@@ -190,6 +192,23 @@ export function LeftPanel({ repo, collapsed, width }: { repo: RepoView; collapse
   }
 
   const filtering = !!filter.trim()
+  const fq = filter.trim().toLowerCase()
+  /** the matched part of a name, highlighted like the original's filter */
+  const hl = (text: string): ReactNode => {
+    const i = fq ? text.toLowerCase().indexOf(fq) : -1
+    if (i < 0) return text
+    return <>{text.slice(0, i)}<mark className="lp-match">{text.slice(i, i + fq.length)}</mark>{text.slice(i + fq.length)}</>
+  }
+  const matchedCount: Record<string, number> = {
+    gitflow: refsUnder(data.localTree).length,
+    local: refsUnder(data.localTree).length,
+    remote: data.remotes.reduce((n, r) => n + refsUnder(r.tree).length, 0),
+    worktrees: data.worktrees.length,
+    stashes: data.stashes.length,
+    tags: data.tags.length,
+    submodules: s.submodules.filter((m) => m.path.toLowerCase().includes(fq)).length
+  }
+  const matchedViewable = matchedCount.local + matchedCount.remote + matchedCount.tags
   const isOpen = (id: string) => filtering || !!open[id]
   const folderOpen = (key: string) => filtering || !closedFolders[key]
   const toggleFolder = (key: string) => setClosedFolders((c) => ({ ...c, [key]: !c[key] }))
@@ -224,7 +243,7 @@ export function LeftPanel({ repo, collapsed, width }: { repo: RepoView; collapse
           <Row key={keyPrefix + r.name} depth={depth} current={r.isCurrent} hidden={isHidden} onEye={() => A2.setHidden(path, [r.name], !isHidden)}
             className={`lp-branch${soloed ? ' is-soloed' : ''}`}
             icon={<Icon name="code-branch" />}
-            title={r.upstreamGone ? `${r.short} (upstream branch was deleted)` : undefined}
+            title={r.short}
             onClick={() => focusCommit(path, r.sha)}
             onDoubleClick={() => A.checkoutRef(path, r)}
             onMenu={() => branchMenu(r, gitflow)}
@@ -242,7 +261,7 @@ export function LeftPanel({ repo, collapsed, width }: { repo: RepoView; collapse
               ) : null}
             </>}
           >
-            <span className="lp-name">{n.name}</span>
+            <span className="lp-name">{hl(n.name)}</span>
           </Row>
         ]
       }
@@ -276,7 +295,9 @@ export function LeftPanel({ repo, collapsed, width }: { repo: RepoView; collapse
         <Icon name={sec.icon} className="lp-header-icon" />
         <span className="lp-caps">{sec.label}</span>
         {extra ? <span className="hover-show" onClick={(e) => e.stopPropagation()}>{extra}</span> : null}
-        <span className={`lp-count${extra ? ' hover-hide' : ''}`}>{countLabel(id)}</span>
+        {filtering
+          ? <span className={`lp-count lp-count-filtered${extra ? ' hover-hide' : ''}`}><Icon name="filter" /> {matchedCount[id] ?? 0}</span>
+          : <span className={`lp-count${extra ? ' hover-hide' : ''}`}>{countLabel(id)}</span>}
       </div>
     )
   }
@@ -296,10 +317,15 @@ export function LeftPanel({ repo, collapsed, width }: { repo: RepoView; collapse
   return (
     <div className="left-panel" style={{ width }}>
       <div className="lp-top">
-        <div className="lp-viewing">
+        <div className={`lp-viewing${filtering ? ' filtering' : ''}`}>
           <span className="lp-collapse" title="Collapse left panel" onClick={() => toggleLeft(false)}><Icon name="chevron-circle-left" /></span>
-          Viewing <span className="lp-viewing-count">{viewing === viewable.length ? viewing : `${viewing}/${viewable.length}`}</span>
-          {viewing !== viewable.length ? <span className="lp-show-all" onClick={() => { A2.setHidden(path, hidden.filter((n) => !n.startsWith('stash:')), false); if (solo.length) A2.setSolo(path, solo, false) }}>Show All</span> : null}
+          {filtering ? <>
+            Filtering <span className="lp-viewing-count">{matchedViewable}/{viewable.length}</span>
+            <span className="lp-show-all" onClick={() => setFilter('')}>Clear filter</span>
+          </> : <>
+            Viewing <span className="lp-viewing-count">{viewing === viewable.length ? viewing : `${viewing}/${viewable.length}`}</span>
+            {viewing !== viewable.length ? <span className="lp-show-all" onClick={() => { A2.setHidden(path, hidden.filter((n) => !n.startsWith('stash:')), false); if (solo.length) A2.setSolo(path, solo, false) }}>Show All</span> : null}
+          </>}
         </div>
         <div className="lp-filter">
           <input placeholder="Filter (Ctrl + Alt + f)" value={filter} onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') setFilter('') }} />
@@ -365,7 +391,7 @@ export function LeftPanel({ repo, collapsed, width }: { repo: RepoView; collapse
                   onClick={() => focusCommit(path, t.sha)}
                   onDoubleClick={() => A.checkoutCommit(path, t.sha)}
                   onMenu={() => void tagMenu(path, t, { inLeftPanel: true })}>
-                  <span className="lp-name">{t.short}</span>
+                  <span className="lp-name">{hl(t.short)}</span>
                 </Row>
               )
             })}</div> : null}
@@ -399,13 +425,15 @@ function RemoteRow({ path, remote, hidden, onEye, onToggle }: { path: string; re
 }
 
 function WorktreeRow({ path, w }: { path: string; w: Worktree }) {
+  const dirty = useStore((st) => { const t = st.repos[path]?.snapshot?.status; return !!t && (t.staged.length + t.unstaged.length) > 0 })
   const folder = w.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
   return (
     <Row depth={0} current={w.isCurrent} noCheck className="lp-worktree" icon={<Icon name={w.isMain ? 'house-o' : 'tree-o'} />} title={w.path}
       onClick={() => w.sha && focusCommit(path, w.sha)}
       onDoubleClick={() => { if (!w.isCurrent) void A.openRepo(w.path) }}
       onMenu={() => void worktreeMenu(path, w)}
-      right={w.locked ? <Icon name="lock" /> : null}>
+      lead={w.locked ? <span className="lp-lock" title="Locked"><Icon name="lock" /></span> : null}
+      right={w.isCurrent && dirty ? <span className="lp-wip-dot" title="Uncommitted changes" /> : null}>
       <Icon name="code-branch" className="lp-inline-icon" />
       <span className="lp-name">{w.branch ?? `${w.sha.slice(0, 7)} (detached)`}</span>
       <Icon name="folder" className="lp-inline-icon dim" />
@@ -415,13 +443,13 @@ function WorktreeRow({ path, w }: { path: string; w: Worktree }) {
 }
 
 function StashRow({ path, st, hidden }: { path: string; st: Stash; hidden: boolean }) {
-  const { msg, branch } = parseStash(st.message)
+  const { msg } = parseStash(st.message, true)
   return (
     <Row depth={0} hidden={hidden} onEye={() => A2.setHidden(path, [stashKey(st.sha)], !hidden)} icon={<Icon name="inbox-o" />} title={st.message}
       onClick={() => focusCommit(path, st.sha)}
       onDoubleClick={() => A.stashApply(path, st.index)}
       onMenu={() => void stashMenu(path, st)}>
-      <span className="lp-name">{msg}{branch ? <> <span className="lp-on">on:</span> <span className="lp-on-branch">{branch}</span></> : null}</span>
+      <span className="lp-name">{msg}</span>
     </Row>
   )
 }

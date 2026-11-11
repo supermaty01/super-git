@@ -10,12 +10,13 @@ import { fullDate, errMsg } from '../lib/format'
 import { avatarUrl } from '../lib/avatar'
 import { Icon } from './Icon'
 import { StatusIcon } from './FileList'
+import { laneColor } from '../graph/colors'
 import { MonacoDiff, MonacoFile, type MonacoDiffHandle } from './MonacoDiff'
 import type { FileContext, FileContents, DiffHunk, BlameLine, Commit } from '@shared/types'
 
 type View = 'diff' | 'file' | 'blame' | 'history'
 
-export function DiffView({ repo, ctx, startEditing }: { repo: RepoView; ctx: FileContext; startEditing?: boolean }) {
+export function DiffView({ repo, ctx, startEditing, startView, historyMode }: { repo: RepoView; ctx: FileContext; startEditing?: boolean; startView?: View; /** inside the File History screen: no header, edit or history buttons; Blame toggles in File View */ historyMode?: boolean }) {
   const path = repo.path
   const settings = useStore((s) => s.settings!)
   const mode = settings.diffMode
@@ -30,7 +31,10 @@ export function DiffView({ repo, ctx, startEditing }: { repo: RepoView; ctx: Fil
   const hunkRef = useRef<HunkViewHandle>(null)
 
   const key = `${ctx.kind}:${'sha' in ctx ? ctx.sha : ctx.kind === 'compare' ? `${ctx.a}..${ctx.b}` : ''}:${ctx.path}`
-  useEffect(() => { setView(ctx.status === 'N' || startEditing ? 'file' : 'diff'); setEditing(!!startEditing && ctx.kind === 'unstaged'); setDraft(null) }, [key, startEditing]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (startView === 'history') { openFileHistory(path, ctx); return }
+    setView(startView ?? (ctx.status === 'N' || startEditing ? 'file' : 'diff')); setEditing(!!startEditing && ctx.kind === 'unstaged'); setDraft(null)
+  }, [key, startEditing, startView]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true
@@ -55,6 +59,12 @@ export function DiffView({ repo, ctx, startEditing }: { repo: RepoView; ctx: Fil
   const badge = ctx.kind === 'unstaged' ? 'Unstaged' : ctx.kind === 'staged' ? 'Staged' : ctx.kind === 'stash' ? 'Stash'
     : ctx.kind === 'compare' ? `${ctx.a.slice(0, 7)} → ${ctx.b ? ctx.b.slice(0, 7) : 'working dir'}` : `${ctx.sha.slice(0, 7)}`
   const isImage = !!(data?.originalImage || data?.modifiedImage)
+  const isSub = !!data?.submodule
+  const added = ctx.status === 'A' || ctx.status === '?'
+  // diff modes make no sense for images, binaries and submodules; blame / history / edit not for submodules
+  const noModes = isImage || isSub || !!data?.binary
+  const showBlame = !added && ctx.status !== 'D' && !isSub
+  const showHistory = !isSub
   const fileSelf = { path: ctx.path, oldPath: 'oldPath' in ctx ? ctx.oldPath : undefined, status: ctx.status }
 
   const save = async () => {
@@ -65,11 +75,11 @@ export function DiffView({ repo, ctx, startEditing }: { repo: RepoView; ctx: Fil
   }
 
   return (
-    <div className="file-view">
-      <div className="file-view-header">
+    <div className={`file-view${historyMode ? ' in-history' : ''}`}>
+      {historyMode ? null : <div className="file-view-header">
         <StatusIcon status={ctx.status} />
         <span className="file-view-title" title={ctx.path}>
-          {'oldPath' in ctx && ctx.oldPath ? <span className="fv-dir">{ctx.oldPath} → </span> : null}
+          {'oldPath' in ctx && ctx.oldPath ? <span className="fv-dir">{ctx.oldPath} ⇒ </span> : null}
           {ctx.path.includes('/') ? <span className="fv-dir">{ctx.path.slice(0, ctx.path.lastIndexOf('/') + 1)}</span> : null}
           <span className="fv-name">{ctx.path.slice(ctx.path.lastIndexOf('/') + 1)}</span>
         </span>
@@ -78,57 +88,70 @@ export function DiffView({ repo, ctx, startEditing }: { repo: RepoView; ctx: Fil
         {ctx.kind === 'staged' ? <button className="btn btn-danger btn-small" onClick={() => A.unstageFiles(path, [fileSelf])}>Unstage File</button> : null}
         <span className="file-view-tool" title="Open in external diff tool (git difftool)" onClick={() => api.externalDiffTool(path, ctx.path, ctx.kind === 'staged', ctx.kind === 'commit' || ctx.kind === 'stash' ? ctx.parent : ctx.kind === 'compare' ? ctx.a : undefined, ctx.kind === 'commit' || ctx.kind === 'stash' ? ctx.sha : ctx.kind === 'compare' ? ctx.b ?? undefined : undefined)}><Icon name="compare" /></span>
         {ctx.status !== 'D' ? <span className="file-view-tool" title="Open in external editor" onClick={() => A2.openInEditor(path, ctx.path)}><Icon name="external" /></span> : null}
+        <span className="fv-encoding">UTF-8</span>
         <span className="file-view-close" title="Close (Esc)" onClick={() => A.closeCenter(path)}><Icon name="times" /></span>
-      </div>
+      </div>}
       <div className="file-view-toolbar">
         <div className="fv-left">
-          {canEdit ? (
+          {historyMode ? null : canEdit ? (
             editing
               ? <><button className="btn btn-success btn-small" disabled={draft === null} onClick={save}><Icon name="save" /> Save</button><button className="btn btn-default btn-small ml1" onClick={() => { setEditing(false); setDraft(null) }}>Cancel</button></>
               : <button className="btn btn-primary-outline btn-small" onClick={() => { setEditing(true); setView('file') }}><Icon name="pen" /> Edit This File</button>
-          ) : ctx.status !== 'D' && ctx.kind !== 'compare' && repo.snapshot ? (
-            <button className="btn btn-primary-outline btn-small" title="Open the current version of this file for editing"
+          ) : ctx.status !== 'D' && ctx.kind !== 'compare' && !isSub && !(ctx.kind === 'commit' && added) && repo.snapshot ? (
+            <button className="btn btn-primary-outline btn-small"
               onClick={() => updateRepo(path, { center: { kind: 'file', ctx: { kind: 'unstaged', path: ctx.path, status: 'M' }, edit: true } })}>
               <Icon name="pen" /> Edit in Working Directory
             </button>
           ) : null}
         </div>
         <div className="fv-center">
-          {ctx.kind === 'compare' ? <span className="fv-badge">{badge}</span> : null}
+          {ctx.kind === 'compare' || ctx.kind === 'staged' || ctx.kind === 'unstaged' ? <span className="fv-badge">{badge}</span> : null}
           <div className="btn-group toggle-group">
-            <button className={`toggle-btn${view === 'file' ? ' checked' : ''}`} onClick={() => setView('file')} disabled={!data || data.binary}>File View</button>
+            <button className={`toggle-btn${view === 'file' || (historyMode && view === 'blame') ? ' checked' : ''}`} onClick={() => setView('file')} disabled={!data || data.binary || isSub}>File View</button>
             <button className={`toggle-btn${view === 'diff' ? ' checked' : ''}`} onClick={() => { setView('diff'); setEditing(false) }}>Diff View</button>
           </div>
         </div>
         <div className="fv-right">
-          <div className="btn-group toggle-group">
-            <button className={`toggle-btn${view === 'blame' ? ' checked' : ''}`} disabled={ctx.status === 'A' || ctx.status === '?'} onClick={() => setView(view === 'blame' ? 'diff' : 'blame')}>Blame</button>
-            <button className={`toggle-btn${view === 'history' ? ' checked' : ''}`} onClick={() => setView(view === 'history' ? 'diff' : 'history')}>History</button>
-          </div>
-          <div className="btn-group toggle-group">
-            <button className="toggle-btn" title="Previous change" onClick={() => (mode === 'hunk' ? hunkRef.current?.prev() : diffRef.current?.prev())}><Icon name="arrow-up" /></button>
-            <button className="toggle-btn" title="Next change" onClick={() => (mode === 'hunk' ? hunkRef.current?.next() : diffRef.current?.next())}><Icon name="arrow-down" /></button>
-          </div>
-          <div className="btn-group toggle-group">
-            <button className={`toggle-btn icon-only${mode === 'hunk' && view === 'diff' ? ' checked' : ''}`} title="Hunk View" onClick={() => setMode('hunk')}><Icon name="view-hunk" /></button>
-            <button className={`toggle-btn icon-only${mode === 'inline' && view === 'diff' ? ' checked' : ''}`} title="Inline View" onClick={() => setMode('inline')}><Icon name="view-inline" /></button>
-            <button className={`toggle-btn icon-only${mode === 'split' && view === 'diff' ? ' checked' : ''}`} title="Split View" onClick={() => setMode('split')}><Icon name="view-split" /></button>
-          </div>
-          <div className="btn-group toggle-group">
-            <button className={`toggle-btn icon-only${ignoreWs ? ' checked' : ''}`} title="Ignore whitespace" onClick={() => { setIgnoreWs(!ignoreWs); void api.setSettings({ showWhitespace: !ignoreWs }) }}><Icon name="paragraph" /></button>
-            <button className={`toggle-btn icon-only${wrap ? ' checked' : ''}`} title="Word wrap" onClick={() => { setWrap(!wrap); void api.setSettings({ wordWrap: !wrap }) }}><Icon name="align-left" /></button>
-          </div>
+          {historyMode && (view === 'file' || view === 'blame') ? (
+            <>
+              <div className="btn-group toggle-group">
+                <button className={`toggle-btn icon-only${wrap ? ' checked' : ''}`} title="Word Wrap" onClick={() => { setWrap(!wrap); void api.setSettings({ wordWrap: !wrap }) }}><Icon name="align-left" /></button>
+              </div>
+              {showBlame ? <div className="btn-group toggle-group"><button className={`toggle-btn${view === 'blame' ? ' checked' : ''}`} onClick={() => setView(view === 'blame' ? 'file' : 'blame')}>Blame</button></div> : null}
+            </>
+          ) : null}
+          {view !== 'file' && !(historyMode && view === 'blame') ? <>
+            {!historyMode && (showBlame || showHistory) ? (
+              <div className="btn-group toggle-group">
+                {showBlame ? <button className={`toggle-btn${view === 'blame' ? ' checked' : ''}`} onClick={() => setView(view === 'blame' ? 'diff' : 'blame')}>Blame</button> : null}
+                {showHistory ? <button className="toggle-btn" onClick={() => openFileHistory(path, ctx)}>History</button> : null}
+              </div>
+            ) : null}
+            <div className="btn-group toggle-group">
+              <button className="toggle-btn" title="Previous Change" disabled={noModes} onClick={() => (mode === 'hunk' ? hunkRef.current?.prev() : diffRef.current?.prev())}><Icon name="arrow-up" /></button>
+              <button className="toggle-btn" title="Next Change" disabled={noModes} onClick={() => (mode === 'hunk' ? hunkRef.current?.next() : diffRef.current?.next())}><Icon name="arrow-down" /></button>
+            </div>
+            <div className="btn-group toggle-group">
+              <button className={`toggle-btn icon-only${mode === 'hunk' && view === 'diff' ? ' checked' : ''}`} title="Hunk View" disabled={noModes} onClick={() => setMode('hunk')}><Icon name="view-hunk" /></button>
+              <button className={`toggle-btn icon-only${mode === 'inline' && view === 'diff' ? ' checked' : ''}`} title="Inline View" disabled={noModes} onClick={() => setMode('inline')}><Icon name="view-inline" /></button>
+              <button className={`toggle-btn icon-only${mode === 'split' && view === 'diff' ? ' checked' : ''}`} title="Split View" disabled={noModes} onClick={() => setMode('split')}><Icon name="view-split" /></button>
+            </div>
+          </> : null}
+          {historyMode && (view === 'file' || view === 'blame') ? null : <div className="btn-group toggle-group">
+            {view !== 'file' ? <button className={`toggle-btn icon-only${ignoreWs ? ' checked' : ''}`} title="Ignore Leading/Trailing Whitespace" disabled={noModes} onClick={() => { setIgnoreWs(!ignoreWs); void api.setSettings({ showWhitespace: !ignoreWs }) }}><Icon name="paragraph" /></button> : null}
+            <button className={`toggle-btn icon-only${wrap ? ' checked' : ''}`} title="Word Wrap" onClick={() => { setWrap(!wrap); void api.setSettings({ wordWrap: !wrap }) }}><Icon name="align-left" /></button>
+          </div>}
         </div>
       </div>
       <div className="file-view-body">
         {error ? <div className="file-view-message">{error}</div>
           : !data ? <div className="loading"><div className="spinner" /></div>
+            : isSub ? <SubmoduleDiff data={data} />
             : isImage && view !== 'history' ? <ImageDiff data={data} />
             : data.binary && view !== 'history' ? <div className="file-view-message">Binary file — no text diff available.</div>
               : view === 'file' ? (
                 <MonacoFile value={draft ?? data.modified} file={ctx.path} readOnly={!editing} wrap={wrap} onChange={(v) => editing && setDraft(v)} onSave={save} />
               ) : view === 'blame' ? <BlameView repo={repo} ctx={ctx} />
-                : view === 'history' ? <HistoryView repo={repo} ctx={ctx} ignoreWs={ignoreWs} wrap={wrap} />
                   : mode === 'hunk' ? <HunkView ref={hunkRef} repo={repo} ctx={ctx} data={data} />
                     : <MonacoDiff ref={diffRef} original={data.original} modified={data.modified} file={ctx.path} sideBySide={mode === 'split'} ignoreWs={ignoreWs} wrap={wrap} />}
       </div>
@@ -160,7 +183,6 @@ const HunkView = forwardRef<HunkViewHandle, { repo: RepoView; ctx: FileContext; 
   // changed words inside modified lines: each run of removed lines is paired with the added run after it
   const words = useMemo(() => hunks.map((h) => {
     const marks = new Map<number, Array<[number, number]>>()
-    const share = (r: Array<[number, number]>, len: number) => r.reduce((n, [a, b]) => n + b - a, 0) / Math.max(1, len)
     for (let i = 0; i < h.lines.length;) {
       if (h.lines[i].type !== 'del') { i++; continue }
       const dels: number[] = []
@@ -170,8 +192,6 @@ const HunkView = forwardRef<HunkViewHandle, { repo: RepoView; ctx: FileContext; 
       for (let k = 0; k < Math.min(dels.length, adds.length); k++) {
         const a = h.lines[dels[k]].content, b = h.lines[adds[k]].content
         const d = wordDiff(a, b)
-        // a line that changed almost entirely reads better without word marks
-        if (share(d.removed, a.length) > 0.8 || share(d.added, b.length) > 0.8) continue
         marks.set(dels[k], d.removed)
         marks.set(adds[k], d.added)
       }
@@ -197,7 +217,7 @@ const HunkView = forwardRef<HunkViewHandle, { repo: RepoView; ctx: FileContext; 
     })
   }
 
-  if (!hunks.length) return <div className="file-view-message">{data.original === data.modified ? 'No changes' : 'Only whitespace or mode changes'}</div>
+  if (!hunks.length) return <div className="file-view-message">{data.original === data.modified ? 'File contents are unchanged.' : 'Only whitespace or mode changes'}</div>
   return (
     <div className="hunk-view" ref={scroller}>
       {hunks.map((h: DiffHunk, hi) => {
@@ -230,7 +250,7 @@ const HunkView = forwardRef<HunkViewHandle, { repo: RepoView; ctx: FileContext; 
                   <div key={li} className={`hunk-line ${l.type}${isSel ? ' line-selected' : ''}${selectable ? ' selectable' : ''}`} onClick={() => selectable && toggleLine(hi, li)} title={selectable ? 'Click to select this line for staging' : undefined}>
                     <span className="ln">{l.oldLine ?? ''}</span>
                     <span className="ln">{l.newLine ?? ''}</span>
-                    <span className="mark">{l.type === 'add' ? '+' : l.type === 'del' ? '−' : ''}</span>
+                    <span className="mark">{l.type === 'add' ? '+' : l.type === 'del' ? '—' : ''}</span>
                     <span className="code" dangerouslySetInnerHTML={{ __html: html ?? escape(l.content) }} />
                   </div>
                 )
@@ -262,19 +282,21 @@ function BlameView({ repo, ctx }: { repo: RepoView; ctx: FileContext }) {
   }, [path, ctx, sha])
   if (err) return <div className="file-view-message">{err}</div>
   if (!lines) return <div className="loading"><div className="spinner" /></div>
+  const order = new Map<string, number>()
+  for (const l of lines) if (!order.has(l.sha)) order.set(l.sha, order.size)
   return (
     <div className="blame-view">
       {lines.map((l, i) => {
         const first = i === 0 || lines[i - 1].sha !== l.sha
         const uncommitted = /^0+$/.test(l.sha)
         return (
-          <div key={i} className={`blame-line${first ? ' first' : ''}`}>
+          <div key={i} className={`blame-line${first ? ' first' : ''}`} style={{ ['--blame-color' as string]: laneColor(order.get(l.sha) ?? 0) }}>
+            <span className="blame-bar" />
             <span className="blame-meta" onClick={() => { if (!uncommitted) { A.selectCommit(path, l.sha); updateRepo(path, { focus: { sha: l.sha, t: Date.now() }, center: { kind: 'graph' } }) } }}>
               {first ? <>
                 <span className="blame-avatar" style={{ backgroundImage: `url(${avatarUrl('', l.author)})` }} />
-                <span className="blame-sha">{uncommitted ? 'Uncommitted' : l.sha.slice(0, 7)}</span>
-                <span className="blame-author truncate">{l.author}</span>
-                <span className="blame-date">{fullDate(l.date)}</span>
+                <span className="blame-summary truncate" title={`${l.sha.slice(0, 7)} · ${l.author}`}>{uncommitted ? 'Uncommitted changes' : l.summary}</span>
+                <span className="blame-date">{fullDate(l.date).split(" @ ")[0]}</span>
               </> : null}
             </span>
             <span className="ln">{l.line}</span>
@@ -287,48 +309,27 @@ function BlameView({ repo, ctx }: { repo: RepoView; ctx: FileContext }) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// File history
+// File history opens its own screen (like the original)
 
-function HistoryView({ repo, ctx, ignoreWs, wrap }: { repo: RepoView; ctx: FileContext; ignoreWs: boolean; wrap: boolean }) {
-  const path = repo.path
-  const [list, setList] = useState<Array<Commit & { path: string }> | null>(null)
-  const [selIdx, setSelIdx] = useState(0)
-  const [diff, setDiff] = useState<FileContents | null>(null)
-  const settings = useStore((s) => s.settings!)
-  useEffect(() => {
-    let alive = true
-    api.fileHistory(path, ctx.path).then((l) => alive && setList(l)).catch(() => alive && setList([]))
-    return () => { alive = false }
-  }, [path, ctx.path])
-  const cur = list?.[selIdx]
-  const prevPath = list?.[selIdx + 1]?.path
-  const c = useMemo<FileContext | null>(() => cur ? { kind: 'commit', sha: cur.sha, parent: cur.parents[0], path: cur.path, oldPath: prevPath && prevPath !== cur.path ? prevPath : undefined, status: 'M' } : null, [cur, prevPath])
-  useEffect(() => {
-    if (!c) return
-    let alive = true
-    api.fileContents(path, c, ignoreWs).then((d) => alive && setDiff(d)).catch(() => undefined)
-    return () => { alive = false }
-  }, [path, c, ignoreWs])
-  if (!list) return <div className="loading"><div className="spinner" /></div>
-  if (!list.length) return <div className="file-view-message">No history for this file.</div>
-  return (
-    <div className="history-view">
-      <div className="history-list">
-        {list.map((h, i) => (
-          <div key={h.sha} className={`history-row${i === selIdx ? ' selected' : ''}`} onClick={() => setSelIdx(i)}>
-            <span className="history-avatar" style={{ backgroundImage: `url(${avatarUrl(h.email, h.author)})` }} />
-            <div className="history-text">
-              <div className="truncate">{h.summary}</div>
-              <div className="history-meta truncate">{h.sha.slice(0, 7)} · {h.author} · {fullDate(h.date)}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="history-diff">
-        {diff ? <MonacoDiff original={diff.original} modified={diff.modified} file={cur!.path} sideBySide={settings.diffMode === 'split'} ignoreWs={ignoreWs} wrap={wrap} /> : null}
-      </div>
+/** the commit a file context belongs to, for File History / File Blame */
+export function historyStart(ctx: FileContext): string | undefined {
+  return ctx.kind === 'commit' || ctx.kind === 'stash' ? ctx.sha : ctx.kind === 'compare' ? ctx.b ?? undefined : undefined
+}
+export function openFileHistory(path: string, ctx: FileContext, blame = false): void {
+  updateRepo(path, { center: { kind: 'history', file: ctx.path, sha: historyStart(ctx), blame } })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Submodule change: the commits the submodule pointed to, like the original
+
+function SubmoduleDiff({ data }: { data: FileContents }) {
+  const box = (kind: 'old' | 'new', v?: { sha: string; message: string }) => v ? (
+    <div className={`submodule-box ${kind}`}>
+      <div><span className="text-secondary">Commit</span> <span className="submodule-sha">{v.sha}</span></div>
+      <div><span className="text-secondary">Commit Message</span> {v.message || <span className="text-secondary">(not available locally)</span>}</div>
     </div>
-  )
+  ) : null
+  return <div className="submodule-diff">{box('old', data.submodule?.old)}{box('new', data.submodule?.new)}</div>
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -338,11 +339,12 @@ function ImageDiff({ data }: { data: FileContents }) {
   const [dims, setDims] = useState<{ a?: string; b?: string }>({})
   return (
     <div className="image-diff">
-      {(['originalImage', 'modifiedImage'] as const).map((k, i) => {
+      {(['originalImage', 'modifiedImage'] as const).filter((k) => data[k]).map((k) => {
+        const i = k === 'modifiedImage' ? 1 : 0
         const src = data[k]
         return (
           <div key={k} className={`image-pane ${i ? 'image-new' : 'image-old'}`}>
-            <div className="image-pane-label">{i ? 'New' : 'Old'}{dims[i ? 'b' : 'a'] ? <span className="text-secondary"> · {dims[i ? 'b' : 'a']}</span> : null}</div>
+            <div className="image-pane-label">{i ? 'New image' : 'Old image'}{dims[i ? 'b' : 'a'] ? <span className="text-secondary"> · {dims[i ? 'b' : 'a']}</span> : null}</div>
             <div className="image-pane-body">
               {src ? <img src={src} onLoad={(e) => { const im = e.currentTarget; setDims((d) => ({ ...d, [i ? 'b' : 'a']: `${im.naturalWidth}×${im.naturalHeight}` })) }} /> : <span className="text-secondary">{i ? 'Deleted' : 'Added'}</span>}
             </div>

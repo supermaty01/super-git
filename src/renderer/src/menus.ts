@@ -33,7 +33,11 @@ async function mergeItems(path: string, their: Ref): Promise<MI[]> {
   if (!ours || their.sha === ours.sha) return []
   const [theirBehind, oursBehind] = await Promise.all([api.isAncestor(path, their.sha, ours.sha), api.isAncestor(path, ours.sha, their.sha)])
   if (theirBehind) {
-    // their branch can be fast-forwarded to ours
+    // their branch can be fast-forwarded to ours; on a tag the original moves the tag
+    if (their.type === 'tag') return [
+      { label: `Fast-forward ${their.short} to ${ours.short}`, act: () => A.moveTag(path, their, ours.short) },
+      { label: `Merge ${ours.short} into ${their.short}`, act: () => A.moveTag(path, their, ours.short) }
+    ]
     if (their.type !== 'head') return []
     return [
       { label: `Fast-forward ${their.short} to ${ours.short}`, act: () => A.fastForward(path, their, ours.short) },
@@ -59,7 +63,8 @@ function rebaseItems(path: string, onto: Ref, _sha: string): MI[] {
   const cur = s.head.branch
   if (!cur || onto.isCurrent) return []
   return [
-    { label: `Rebase ${cur} onto ${onto.short}`, act: () => A.rebaseOnto(path, onto.short) }
+    { label: `Rebase ${cur} onto ${onto.short}`, act: () => A.rebaseOnto(path, onto.short) },
+    { label: `Interactive Rebase ${cur} onto ${onto.short}`, act: () => A.startInteractiveRebase(path, onto.sha, undefined, onto.short) }
   ]
 }
 
@@ -88,6 +93,12 @@ function soloItem(path: string, refs: Ref[]): MI {
   return { label: 'Solo', sub: refs.map((r) => ({ label: r.short, checked: solo.includes(r.name), act: () => A2.setSolo(path, [r.name], !solo.includes(r.name)) })) }
 }
 
+function soloAll(path: string, refs: Ref[]): MI {
+  const solo = A2.soloFor(path)
+  const all = refs.length > 0 && refs.every((r) => solo.includes(r.name))
+  return { label: 'Solo', checked: all, enabled: refs.length > 0, act: () => A2.setSolo(path, refs.map((r) => r.name), !all) }
+}
+
 function hideItem(path: string, refs: Ref[]): MI {
   const hidden = A2.hiddenFor(path)
   const all = refs.every((r) => hidden.includes(r.name))
@@ -97,14 +108,32 @@ function hideItem(path: string, refs: Ref[]): MI {
 // ---------------------------------------------------------------------------------------------
 // commits (graph rows)
 
-function onFirstParentChain(s: RepoSnapshot, sha: string): boolean {
+/** HEAD and its first parents down to (not including) the first merge commit: the commits the original lets you edit, drop and move */
+function linearChain(s: RepoSnapshot): Commit[] {
   const byId = new Map(s.commits.map((c) => [c.sha, c]))
-  let cur = byId.get(s.head.sha)
-  while (cur) {
-    if (cur.sha === sha) return true
+  const out: Commit[] = []
+  let cur = s.head.detached ? undefined : byId.get(s.head.sha)
+  while (cur && cur.parents.length < 2) {
+    out.push(cur)
     cur = cur.parents[0] ? byId.get(cur.parents[0]) : undefined
   }
-  return false
+  return out
+}
+
+/** "Interactive Rebase N children of …", "Edit commit message", "Drop commit", "Move commit up/down" */
+function historyItems(path: string, c: Commit): MI[] {
+  const s = A.snap(path)
+  const chain = linearChain(s)
+  const i = chain.findIndex((x) => x.sha === c.sha)
+  if (i < 0) return []
+  const unpushed = !!s.refs.find((r) => r.type === 'head' && r.isCurrent && (r.ahead ?? 0) > 0) || !s.refs.some((r) => r.type === 'head' && r.isCurrent && r.upstream)
+  const items: MI[] = []
+  if (i > 0) items.push({ label: `Interactive Rebase ${i} children of ${c.sha.slice(0, 6)}`, act: () => A.startInteractiveRebase(path, c.sha) })
+  items.push({ label: 'Edit commit message', act: () => A.rewordCommit(path, c) })
+  if (i > 0 || unpushed) items.push({ label: 'Drop commit', act: () => A.dropCommits(path, [c.sha]) })
+  if (i > 0) items.push({ label: 'Move commit up', act: () => A.moveCommit(path, c.sha, 'up') })
+  if (chain[i + 1] && (i > 0 || unpushed)) items.push({ label: 'Move commit down', act: () => A.moveCommit(path, c.sha, 'down') })
+  return items
 }
 
 export function commitMenu(path: string, c: Commit): Promise<void> {
@@ -116,23 +145,20 @@ export function commitMenu(path: string, c: Commit): Promise<void> {
   const items: MI[] = [
     { label: 'Checkout this commit', act: () => A.checkoutCommit(path, c.sha), enabled: !isHead || !s.head.detached },
     '-',
-    { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { commit: c.sha }) },
+    { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { ref: c.sha }) },
     '-',
     { label: 'Create branch here', act: () => A.startCreateRef(path, 'branch', c.sha) },
     multi
       ? { label: `Cherry pick ${multi.length} commits`, act: () => A.cherryPick(path, multi) }
       : { label: 'Cherry pick commit', act: () => A.cherryPick(path, [c.sha]), enabled: !isHead },
-    // commits in the current branch's own (first-parent) history get the interactive variant, others a plain rebase
-    ...(isHead ? [] : onFirstParentChain(s, c.sha)
-      ? (multi ? [] : [{ label: `Interactive Rebase ${branch} onto this commit`, act: () => interactiveOnto(path, c.sha) } as MI])
-      : [{ label: `Rebase ${branch} onto this commit`, act: () => A.rebaseOnto(path, c.sha) } as MI]),
+    ...(isHead ? [] : [{ label: `Rebase ${branch} onto this commit`, act: () => A.rebaseOnto(path, c.sha) } as MI]),
     resetSub(path, c.sha),
-    ...(isHead && c.parents.length < 2 ? [{ label: 'Edit commit message', act: () => A.rewordCommit(path, c) } as MI] : []),
     { label: 'Revert commit', act: () => A.revertCommit(path, c) },
+    '-',
     ...(multi ? [
       { label: `Squash ${multi.length} commits`, act: () => A.squashCommits(path, multi) } as MI,
       { label: `Drop ${multi.length} commits`, act: () => A.dropCommits(path, multi) } as MI
-    ] : []),
+    ] : historyItems(path, c)),
     '-',
     { label: 'Copy commit sha', act: () => api.copy(multi ? multi.join('\n') : c.sha) },
     multi
@@ -140,7 +166,6 @@ export function commitMenu(path: string, c: Commit): Promise<void> {
       : { label: 'Create patch from commit', act: () => A2.createPatch(path, [c.sha]) },
     ...(isHead ? [{ label: 'Apply patch', act: () => A2.applyPatch(path) } as MI] : []),
     '-',
-    ...(multi?.length === 2 ? [{ label: 'Compare commits', act: () => A2.compareCommits(path, multi[0], multi[1]) } as MI] : []),
     ...commitTail(path, c, isHead)
   ]
   return A.popup(items)
@@ -178,7 +203,8 @@ export async function refGroupMenu(path: string, refs: Ref[], opts: { inLeftPane
   const items: MI[] = []
   if (local) {
     items.push(
-      { label: 'Pull (fast-forward if possible)', act: () => (local.isCurrent ? A.pull(path, 'ff') : pullOther(path, local)), enabled: !!local.upstream },
+      // without an upstream the original first asks where the branch should push to and pull from
+      { label: 'Pull (fast-forward if possible)', act: () => (!local.upstream ? A.setUpstreamDialog(path, local) : local.isCurrent ? A.pull(path, 'ff') : pullOther(path, local)) },
       { label: 'Push', act: () => A.push(path, local.short) },
       { label: 'Set Upstream', act: () => A.setUpstreamDialog(path, local) },
       '-'
@@ -193,7 +219,7 @@ export async function refGroupMenu(path: string, refs: Ref[], opts: { inLeftPane
   const checkoutTargets = branchRefs.filter((r) => !r.isCurrent)
   if (opts.inLeftPanel) {
     if (!primary.isCurrent) items.push({ label: `Checkout ${primary.short}`, act: () => A.checkoutRef(path, primary) }, '-')
-    items.push({ label: `Create worktree from ${primary.short}`, act: () => A.addWorktreeDialog(path, { branch: primary.type === 'head' ? primary.short : undefined, commit: sha }), enabled: !primary.isCurrent }, '-')
+    items.push({ label: `Create worktree from ${primary.short}`, act: () => A.addWorktreeDialog(path, { ref: primary.name }), enabled: !primary.isCurrent }, '-')
   } else {
     items.push({
       label: 'Checkout', sub: [
@@ -202,8 +228,8 @@ export async function refGroupMenu(path: string, refs: Ref[], opts: { inLeftPane
       ]
     }, '-', {
       label: 'Create worktree from', sub: [
-        ...branchRefs.filter((r) => !r.isCurrent).map((r) => ({ label: r.short, act: () => A.addWorktreeDialog(path, { branch: r.type === 'head' ? r.short : undefined, commit: r.sha }) })),
-        { label: 'this commit', act: () => A.addWorktreeDialog(path, { commit: sha }) }
+        ...branchRefs.filter((r) => !r.isCurrent).map((r) => ({ label: r.short, act: () => A.addWorktreeDialog(path, { ref: r.name }) })),
+        { label: 'this commit', act: () => A.addWorktreeDialog(path, { ref: sha }) }
       ]
     }, '-')
   }
@@ -211,14 +237,15 @@ export async function refGroupMenu(path: string, refs: Ref[], opts: { inLeftPane
     { label: 'Create branch here', act: () => A.startCreateRef(path, 'branch', sha) },
     ...(isHead ? [] : [{ label: 'Cherry pick commit', act: () => A.cherryPick(path, [sha]) } as MI]),
     resetSub(path, sha),
-    ...(isHead && commit && commit.parents.length < 2 ? [{ label: 'Edit commit message', act: () => A.rewordCommit(path, commit) } as MI] : []),
     ...(commit ? [{ label: 'Revert commit', act: () => A.revertCommit(path, commit) } as MI] : []),
+    '-',
+    ...(isHead && commit ? historyItems(path, commit) : []),
     '-'
   )
   if (isHead) items.push({ label: 'Apply patch', act: () => A2.applyPatch(path) })
   if (local) items.push({ label: `Rename ${local.short}`, act: () => A.renameBranch(path, local) }, { label: `Delete ${local.short}`, act: () => A.deleteLocalBranch(path, local), enabled: !local.isCurrent })
   for (const r of remotesInGroup) items.push({ label: `Delete ${r.short}`, act: () => A.deleteRemoteBranch(path, r) })
-  if (local && remotesInGroup.length) items.push({ label: `Delete ${local.short} and ${remotesInGroup[0].short}`, enabled: !local.isCurrent, act: async () => { await A.deleteLocalBranch(path, local); await A.deleteRemoteBranch(path, remotesInGroup[0]) } })
+  if (local && remotesInGroup.length) items.push({ label: remotesInGroup.length === 1 ? `Delete ${local.short} and ${remotesInGroup[0].short}` : `Delete all "${local.short}" branches (local && remote)`, enabled: !local.isCurrent, act: () => A.deleteBranchEverywhere(path, local, remotesInGroup) })
   items.push('-',
     { label: 'Copy branch name', act: () => api.copy(primary.short) },
     { label: 'Copy commit sha', act: () => api.copy(sha) },
@@ -254,31 +281,28 @@ async function ffIfPossible(path: string, branch: Ref, to: Ref) {
   await A.fastForward(path, branch, to.short)
 }
 
-async function interactiveOnto(path: string, sha: string) {
-  const ancestor = await api.isAncestor(path, sha, A.snap(path).head.sha)
-  if (!ancestor) {
-    showPrompt({ kind: 'confirm', message: 'The target is not an ancestor of the current branch. Rebase onto it first, then edit your commits.', buttons: [] })
-    return
-  }
-  A.startInteractiveRebase(path, sha)
-}
-
 export async function tagMenu(path: string, ref: Ref, opts: { inLeftPanel?: boolean } = {}): Promise<void> {
   const s = A.snap(path)
   const remotes = remotesOf(path)
   const isHead = ref.sha === s.head.sha
   const commit = s.commits.find((c) => c.sha === ref.sha)
+  // like the original: push to the remotes that lack the tag, delete from the ones that have it
+  const known = await Promise.race([A.remoteTagsOf(path), new Promise<Record<string, string[] | null>>((ok) => setTimeout(() => ok({}), 4000))])
+  const has = (r: string) => known[r]?.includes(ref.short)
+  const pushTo = remotes.map((r) => r.name).filter((r) => !known[r] || !has(r))
+  const delFrom = remotes.map((r) => r.name).filter((r) => !known[r] || has(r))
+  const pushItems = pushTo.map((r) => ({ label: `Push ${ref.short} to ${r}`, act: () => A.pushTag(path, r, ref) }) as MI)
+  const delItems = delFrom.map((r) => ({ label: `Delete ${ref.short} from ${r}`, act: () => A.deleteRemoteTag(path, r, ref) }) as MI)
+  const cur = s.head.branch
   const items: MI[] = [
-    ...(remotes.length === 1
-      ? [{ label: `Push ${ref.short} to ${remotes[0].name}`, act: () => A.pushTag(path, remotes[0].name, ref) } as MI]
-      : remotes.length ? [{ label: 'Push tag to remote', sub: remotes.map((r) => ({ label: r.name, act: () => A.pushTag(path, r.name, ref) })) } as MI] : []),
+    ...(pushItems.length > 1 ? [{ label: 'Push tag to remote', sub: [...pushItems, '-', { label: `Push ${ref.short} to all remotes`, act: () => A.pushTagToAll(path, ref, pushTo) }] } as MI] : pushItems),
     '-',
     ...(await mergeItems(path, ref)),
-    ...rebaseItems(path, ref, ref.sha),
+    ...(cur && !ref.isCurrent ? [{ label: `Rebase ${cur} onto ${ref.short}`, act: () => A.rebaseOnto(path, ref.short) } as MI] : []),
     '-',
     { label: opts.inLeftPanel ? `Checkout the commit at ${ref.short}` : 'Checkout this commit', act: () => A.checkoutCommit(path, ref.sha) },
     '-',
-    { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { commit: ref.sha }) },
+    { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { ref: ref.sha }) },
     '-',
     { label: 'Create branch here', act: () => A.startCreateRef(path, 'branch', ref.sha) },
     ...(isHead ? [] : [{ label: 'Cherry pick commit', act: () => A.cherryPick(path, [ref.sha]) } as MI]),
@@ -286,7 +310,7 @@ export async function tagMenu(path: string, ref: Ref, opts: { inLeftPanel?: bool
     ...(commit ? [{ label: 'Revert commit', act: () => A.revertCommit(path, commit) } as MI] : []),
     '-',
     { label: `Delete ${ref.short} locally`, act: () => A.deleteTag(path, ref) },
-    ...(remotes.length ? [{ label: 'Delete tag from remote', sub: remotes.map((r) => ({ label: `Delete ${ref.short} from ${r.name}`, act: () => A.deleteRemoteTag(path, r.name, ref) })) } as MI] : []),
+    ...(delItems.length > 1 ? [{ label: 'Delete tag from remote', sub: [...delItems, '-', { label: `Delete ${ref.short} from all remotes`, act: () => A.deleteTagFromAllRemotes(path, ref, delFrom) }] } as MI] : delItems),
     '-',
     { label: 'Copy tag name', act: () => api.copy(ref.short) },
     '-',
@@ -323,31 +347,37 @@ export function remoteMenu(path: string, remote: Remote): Promise<void> {
     { label: `Remove ${remote.name}`, act: () => showPrompt({ kind: 'confirm', message: `Are you sure you want to remove the remote '${remote.name}'?`, buttons: [{ label: 'Remove', style: 'danger', run: () => A.run(path, () => api.removeRemote(path, remote.name)) }] }) },
     '-',
     hideItem(path, names),
-    soloItem(path, names.length ? names : [])
+    soloAll(path, names)
   ])
 }
 
-export function folderMenu(path: string, folder: string, refs: Ref[]): Promise<void> {
+export async function folderMenu(path: string, folder: string, refs: Ref[]): Promise<void> {
+  // like the original: local folders only offer deleting their branches, remote folders have no menu
   const locals = refs.filter((r) => r.type === 'head' && !r.isCurrent)
+  if (!refs.some((r) => r.type === 'head')) return
   return A.popup([
     { label: locals.length === 1 ? `Delete 1 branch in folder "${folder}"` : `Delete ${locals.length} branches in folder "${folder}"`, enabled: locals.length > 0, act: () => showPrompt({
-      kind: 'confirm', message: `Delete ${locals.length} branch(es) in folder "${folder}"?`,
+      kind: 'confirm', message: locals.length === 1 ? `This is a destructive operation, are you sure you want to delete 1 local branch in "${folder}"?` : `This is a destructive operation, are you sure you want to delete ${locals.length} local branches in "${folder}"?`,
       buttons: [{ label: 'Delete', style: 'danger', run: async () => { for (const r of locals) await A.run(path, () => api.deleteBranch(path, r.short, true), { errorTitle: `Could not delete ${r.short}`, refresh: false }); await A.refresh(path) } }]
-    }) },
-    '-',
-    hideItem(path, refs),
-    soloItem(path, refs)
+    }) }
   ])
 }
 
 export function worktreeMenu(path: string, wt: Worktree): Promise<void> {
+  // the worktree that is open has nothing to offer in the original
+  if (wt.isCurrent) return A.popup([{ label: '(no actions)', enabled: false }])
+  const branch = wt.branch?.replace(/^refs\/heads\//, '')
   return A.popup([
-    { label: 'Open worktree', act: () => A.openRepo(wt.path), enabled: !wt.isCurrent },
-    { label: 'Show in folder', act: () => api.showInFolder(wt.path) },
-    '-',
-    { label: 'Remove worktree', act: () => A.removeWorktree(path, wt), enabled: !wt.isMain && !wt.isCurrent },
-    '-',
-    { label: 'Copy worktree path', act: () => api.copy(wt.path) }
+    { label: 'Open this worktree', act: () => A2.openInThisTab(path, wt.path) },
+    { label: 'Open worktree in new tab', act: () => A.openRepo(wt.path) },
+    ...(wt.isMain ? [] : [
+      { label: 'Remove this worktree', act: () => A.removeWorktree(path, wt) } as MI,
+      ...(branch ? [{ label: 'Remove worktree and delete branch', act: () => A.removeWorktree(path, wt, true) } as MI] : []),
+      '-' as MI,
+      wt.locked
+        ? { label: 'Unlock this worktree', act: () => A.run(path, () => api.lockWorktree(path, wt.path, null), { errorTitle: 'Could not unlock worktree' }) } as MI
+        : { label: 'Lock this worktree', act: () => showPrompt({ kind: 'input', message: 'Message (optional):', placeholder: 'Lock message', extraButtons: [], onSubmit: (m) => A.run(path, () => api.lockWorktree(path, wt.path, m), { errorTitle: 'Could not lock worktree' }) }) } as MI
+    ])
   ])
 }
 
@@ -358,7 +388,11 @@ export function submoduleMenu(path: string, sm: Submodule): Promise<void> {
     { label: `Edit ${sm.path}`, act: () => openModal('repoPrefs', { path: `${path}\\${sm.path.replace(/\//g, '\\')}` }), enabled: sm.state !== '-' },
     { label: 'Open this submodule', act: () => A2.openSubmodule(path, sm.path), enabled: sm.state !== '-' },
     '-',
-    { label: 'Copy path', act: () => api.copy(sm.path) }
+    '-',
+    { label: 'Delete this submodule', act: () => showPrompt({ kind: 'confirm', message: `This is a destructive operation, are you sure you want to delete "${sm.path}"?`, buttons: [
+      { label: 'Delete & Commit', style: 'danger', run: () => A.run(path, () => api.deleteSubmodule(path, sm.path, true), { busy: 'Deleting', errorTitle: 'Could not delete submodule' }) },
+      { label: 'Delete', style: 'danger', run: () => A.run(path, () => api.deleteSubmodule(path, sm.path), { busy: 'Deleting', errorTitle: 'Could not delete submodule' }) }
+    ] }) }
   ])
 }
 
@@ -394,8 +428,8 @@ export function sectionMenu(path: string, id: string, onMaximize: () => void): P
     ...top,
     { label: 'Maximize this section', act: onMaximize },
     '-',
-    ...LEFT_SECTIONS.map((sec) => ({
-      label: sec.label, checked: !hiddenSecs.includes(sec.id), enabled: !sec.locked && sec.id !== id,
+    ...LEFT_SECTIONS.filter((sec) => sec.id !== 'gitflow' || s.gitflow.initialized).map((sec) => ({
+      label: sec.label, checked: !hiddenSecs.includes(sec.id), enabled: !sec.locked,
       act: () => A2.saveSettings({ hiddenSections: hiddenSecs.includes(sec.id) ? hiddenSecs.filter((x) => x !== sec.id) : [...hiddenSecs, sec.id] })
     }))
   ])
@@ -430,7 +464,7 @@ export function graphHeaderMenu(path: string, autoReset: () => void): Promise<vo
 // files
 
 /** Right-click on a file row in the staging / commit panel. */
-export function fileMenu(path: string, f: FileChange, where: 'unstaged' | 'staged' | 'conflicted' | 'commit', ctx?: FileContext): Promise<void> {
+export async function fileMenu(path: string, f: FileChange, where: 'unstaged' | 'staged' | 'conflicted' | 'commit', ctx?: FileContext): Promise<void> {
   const abs = `${path}\\${f.path.replace(/\//g, '\\')}`
   const sel = A.repoView(path).fileSel
   const s = A.snap(path)
@@ -449,22 +483,32 @@ export function fileMenu(path: string, f: FileChange, where: 'unstaged' | 'stage
     { label: 'Edit file', act: () => updateRepo(path, { center: { kind: 'file', ctx: { kind: 'unstaged', path: f.path, status: 'N' } } }), enabled: f.status !== 'D' },
     { label: 'Delete file', act: () => confirmDeleteFile(path, f.path), enabled: f.status !== 'D' }
   ]
-  const ignoreLfs: MI[] = isNew ? [
+  // like the original: Ignore for every working file, LFS only in a repository that uses LFS
+  const lfs = where === 'unstaged' || where === 'staged' ? await api.lfsInfo(path).then((i) => i.enabled).catch(() => false) : false
+  const ignoreLfs: MI[] = where === 'unstaged' || where === 'staged' ? [
     { label: 'Ignore', sub: [
       { label: `Ignore '${name}'`, act: () => ignorePath(path, f.path) },
       ...(ext ? [{ label: `All files with the extension '${ext}'`, act: () => ignorePath(path, `*${ext}`) }] : [])
     ] },
-    { label: 'LFS', sub: [
+    ...(lfs && isNew ? [{ label: 'LFS', sub: [
       { label: `Track '${name}'`, act: () => A.run(path, () => api.lfsTrack(path, f.path)) },
       ...(ext ? [{ label: `Track all files with the extension '${ext}'`, act: () => A.run(path, () => api.lfsTrack(path, `*${ext}`)) }] : [])
-    ] }
+    ] } as MI] : [])
   ] : []
+  // tracked files also offer their history and blame
+  const fctx: FileContext | undefined = ctx ?? (where === 'unstaged' ? { kind: 'unstaged', path: f.path, status: f.status } : where === 'staged' ? { kind: 'staged', path: f.path, oldPath: f.oldPath, status: f.status } : undefined)
+  const historyBlame: MI[] = isNew || !fctx ? [] : [
+    '-',
+    { label: 'File History', act: () => updateRepo(path, { center: { kind: 'history', file: f.path } }) },
+    { label: 'File Blame', act: () => updateRepo(path, { center: { kind: 'history', file: f.path, blame: true } }), enabled: f.status !== 'D' }
+  ]
   const filePatch = { label: 'Create patch from file changes', act: () => createFilePatch(path, f.path, where === 'staged') }
   if (where === 'unstaged') return A.popup([
     { label: multi.length > 1 ? `Stage ${multi.length} files` : 'Stage', act: () => A.stageFiles(path, multi) },
-    { label: multi.length > 1 ? `Discard changes to ${multi.length} files` : 'Discard changes', act: () => A.discardFiles(path, multi) },
+    ...(f.status === '?' && multi.length === 1 ? [] : [{ label: multi.length > 1 ? `Discard changes to ${multi.length} files` : 'Discard changes', act: () => A.discardFiles(path, multi) } as MI]),
     ...ignoreLfs,
     { label: 'Stash file', act: () => A.run(path, () => api.stashPaths(path, multi.map((x) => x.path))) },
+    ...historyBlame,
     '-', ...open, '-',
     { label: 'Copy file path', act: () => api.copy(f.path) },
     filePatch,
@@ -475,6 +519,7 @@ export function fileMenu(path: string, f: FileChange, where: 'unstaged' | 'stage
     ...(isNew ? [{ label: 'Unstage and delete file', act: async () => { await A.unstageFiles(path, [f]); await confirmDeleteFile(path, f.path) } } as MI] : []),
     ...ignoreLfs,
     { label: 'Stash file', act: () => A.run(path, () => api.stashPaths(path, multi.map((x) => x.path))) },
+    ...historyBlame,
     '-', ...open, '-',
     { label: 'Copy file path', act: () => api.copy(f.path) },
     filePatch,
@@ -496,7 +541,8 @@ export function fileMenu(path: string, f: FileChange, where: 'unstaged' | 'stage
     ])
   }
   return A.popup([
-    { label: 'File History', act: () => ctx && updateRepo(path, { center: { kind: 'file', ctx }, }) },
+    { label: 'File History', act: () => ctx && updateRepo(path, { center: { kind: 'history', file: f.path, sha: ctx.kind === 'commit' || ctx.kind === 'stash' ? ctx.sha : undefined } }) },
+    { label: 'File Blame', enabled: f.status !== 'D', act: () => ctx && updateRepo(path, { center: { kind: 'history', file: f.path, sha: ctx.kind === 'commit' || ctx.kind === 'stash' ? ctx.sha : undefined, blame: true } }) },
     '-', ...open, '-',
     { label: 'Copy file path', act: () => api.copy(f.path) },
     '-', ...editDelete,

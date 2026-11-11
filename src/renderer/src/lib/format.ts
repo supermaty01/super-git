@@ -68,10 +68,11 @@ export function errMsg(e: unknown): string {
 }
 
 /** "On main: park wip" / "WIP on main: 1a2b3c msg" -> the message as shown in the UI and the branch it was made on */
-export function parseStash(message: string): { msg: string; branch?: string } {
+export function parseStash(message: string, keepSha = false): { msg: string; branch?: string } {
   const m = /^(?:WIP on|On) ([^:]+): (.*)$/s.exec(message)
   if (!m) return { msg: message }
-  return { msg: m[2].replace(/^[0-9a-f]{7,40} /, ''), branch: m[1] }
+  // the graph and the left panel keep git's "<sha> <subject>" text, like the original
+  return { msg: keepSha ? m[2] : m[2].replace(/^[0-9a-f]{7,40} /, ''), branch: m[1] }
 }
 
 /** key under which a hidden stash is remembered next to the hidden branches */

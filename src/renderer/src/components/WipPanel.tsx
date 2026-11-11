@@ -27,6 +27,8 @@ export function WipPanel({ repo }: { repo: RepoView }) {
   const total = new Set([...st.staged, ...st.unstaged, ...st.conflicted].map((f) => f.path)).size
   const branch = s.head.branch ?? s.head.sha.slice(0, 7)
   const inOp = state.kind !== 'none'
+  // like the original, untracked files that have nothing to do with the merge stay out of the way while it runs
+  const opUnstaged = st.unstaged.filter((f) => f.status !== '?')
 
   const openUnstaged = (f: FileChange) => A.openFile(path, { kind: 'unstaged', path: f.path, status: f.status })
   const openStaged = (f: FileChange) => A.openFile(path, { kind: 'staged', path: f.path, oldPath: f.oldPath, status: f.status })
@@ -34,7 +36,7 @@ export function WipPanel({ repo }: { repo: RepoView }) {
 
   const unstagedList = (
     <FileList
-      files={st.unstaged}
+      files={inOp ? opUnstaged : st.unstaged}
       mode={mode}
       sortDesc={sortDesc}
       activePath={activeUn}
@@ -78,7 +80,7 @@ export function WipPanel({ repo }: { repo: RepoView }) {
         </div>
       ) : (
         <div className="wip-header">
-          <span className="wip-discard" title="Discard all changes" onClick={() => A.discardAll(path)}><Icon name="trash" /></span>
+          <span className="wip-discard" title="Discard all changes" onClick={() => A.discardAll(path)}><Icon name="trash-o" /></span>
           <span className="wip-header-text">{total} file change{total === 1 ? '' : 's'} on <span className="pill pill-teal">{branch}</span></span>
         </div>
       )}
@@ -104,7 +106,7 @@ export function WipPanel({ repo }: { repo: RepoView }) {
                   onContext={(f) => fileMenu(path, f, 'conflicted')}
                   rowAction={(f) => <button className="btn btn-warning btn-xs" onClick={() => A.markResolved(path, [f.path])}>Mark Resolved</button>}
                 />
-                {st.unstaged.length ? <><div className="wip-subheader">Unstaged Files ({st.unstaged.length})</div>{unstagedList}</> : null}
+                {opUnstaged.length ? <><div className="wip-subheader">Unstaged Files ({opUnstaged.length})</div>{unstagedList}</> : null}
               </div>
             ) : null}
           </div>
@@ -168,10 +170,10 @@ function CommitBox({ repo }: { repo: RepoView }) {
   const [tab, setTab] = useState<'commit' | 'stash'>('commit')
   const [showOpts, setShowOpts] = useState(false)
   const [noVerify, setNoVerify] = useState(() => getState().settings!.skipHooksDefault)
-  const [sign, setSign] = useState(false)
+  const [pushAfter, setPushAfter] = useState(() => getState().settings!.pushAfterCommit)
   const spell = useStore((x) => x.settings!.spellcheck)
-  const [stashMsg, setStashMsg] = useState('')
-  const [stashMode, setStashMode] = useState<'all' | 'staged' | 'keep-index'>('all')
+  const [stashTitle, setStashTitle] = useState('')
+  const [stashBody, setStashBody] = useState('')
   // pre-fill with the repository's commit template (commit.template) when the box is empty
   useEffect(() => {
     if (inOp || summary || description) return
@@ -187,37 +189,43 @@ function CommitBox({ repo }: { repo: RepoView }) {
   let label: string
   let enabled = false
   if (inOp) {
-    if (st.conflicted.length) label = 'Resolve conflicts to continue'
+    if (st.conflicted.length) label = state.kind === 'merge' ? 'No Changes to Merge' : 'Resolve conflicts to continue'
     else if (state.kind === 'merge') { label = summary.trim() ? 'Commit and Merge' : 'Type a Message to Commit'; enabled = !!summary.trim() }
     else { label = `Continue ${opTitle(state.kind)}`; enabled = true }
   } else if (!summary.trim()) label = 'Type a Message to Commit'
   else if (!staged && !amend) label = 'Stage Changes to Commit'
-  else { label = amend ? 'Amend Previous Commit' : `Commit changes to ${staged} file${staged === 1 ? '' : 's'}`; enabled = true }
+  else {
+    // the original's wording: "Commit Changes to N Files" + " and Push" + " (Skip Hooks)"
+    label = amend ? 'Amend Previous Commit' : `Commit Changes to ${staged} File${staged === 1 ? '' : 's'}${pushAfter ? ' and Push' : ''}${noVerify ? ' (Skip Hooks)' : ''}`
+    enabled = true
+  }
 
   const submit = () => {
     if (!enabled) return
     if (inOp && state.kind !== 'merge') void A.continueOp(path)
-    else void A.commit(path, { noVerify, sign })
+    else void A.commit(path, { noVerify, push: pushAfter })
   }
   const dirty = st.staged.length + st.unstaged.length > 0
+  const changedFiles = new Set([...st.staged, ...st.unstaged].map((f) => f.path)).size
 
   return (
     <div className="commit-box">
       <div className="commit-tabs">
         <span className={`commit-tab${tab === 'commit' ? ' active' : ''}`} onClick={() => setTab('commit')}><Icon name="commit" /> Commit</span>
-        {!inOp ? <span className={`commit-tab${tab === 'stash' ? ' active' : ''}`} title="Stash" onClick={() => setTab('stash')}><Icon name="stash" /> Stash</span> : null}
+        {!inOp ? <span className={`commit-tab icon-only${tab === 'stash' ? ' active' : ''}`} title="Stash" onClick={() => setTab('stash')}><Icon name="stash" /></span> : null}
       </div>
       {tab === 'stash' && !inOp ? (
         <div className="stash-box">
-          <input className="form-control" placeholder="Stash message (optional)" value={stashMsg} onChange={(e) => setStashMsg(e.target.value)} />
-          <div className="stash-modes">
-            <label className="form-check"><input type="radio" checked={stashMode === 'all'} onChange={() => setStashMode('all')} /> All changes (including untracked)</label>
-            <label className="form-check"><input type="radio" checked={stashMode === 'staged'} onChange={() => setStashMode('staged')} disabled={!staged} /> Staged changes only</label>
-            <label className="form-check"><input type="radio" checked={stashMode === 'keep-index'} onChange={() => setStashMode('keep-index')} /> All, but keep staged changes in place</label>
+          <div className="commit-message-inputs">
+            <div className="commit-summary-row">
+              <input className="commit-summary-input" spellCheck={spell} placeholder="Stash title" value={stashTitle} onChange={(e) => setStashTitle(e.target.value)} />
+            </div>
+            <textarea className="commit-description-input" spellCheck={spell} placeholder="Description" value={stashBody} onChange={(e) => setStashBody(e.target.value)} />
           </div>
           <div className="commit-buttons">
-            <button className={`btn btn-primary btn-commit${dirty ? '' : ' disabled'}`} disabled={!dirty || (stashMode === 'staged' && !staged)} onClick={() => { void A.stashSave(path, stashMsg, stashMode); setStashMsg('') }}>
-              <Icon name="stash" /> {dirty ? 'Stash Changes' : 'No changes to stash'}
+            <button className={`btn btn-success btn-commit${dirty && stashTitle.trim() ? '' : ' disabled'}`} disabled={!dirty || !stashTitle.trim()}
+              onClick={() => { void A.stashSave(path, [stashTitle.trim(), stashBody.trim()].filter(Boolean).join(' ')); setStashTitle(''); setStashBody('') }}>
+              <Icon name="stash" /> {!stashTitle.trim() ? 'Type a Message to Stash' : !dirty ? 'Stage Changes to Stash' : `Stash Changes to ${changedFiles} File${changedFiles === 1 ? '' : 's'}`}
             </button>
           </div>
         </div>
@@ -235,7 +243,7 @@ function CommitBox({ repo }: { repo: RepoView }) {
             placeholder="Commit summary"
             value={summary}
             onChange={(e) => setWip({ summary: e.target.value })}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit() }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) submit() }}
           />
           <span className={`commit-count${remaining < 0 ? ' over' : ''}`}>{remaining}</span>
         </div>
@@ -245,7 +253,7 @@ function CommitBox({ repo }: { repo: RepoView }) {
           placeholder="Description"
           value={description}
           onChange={(e) => setWip({ description: e.target.value })}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit() }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) submit() }}
         />
       </div>
       {!inOp ? (
@@ -253,8 +261,8 @@ function CommitBox({ repo }: { repo: RepoView }) {
           <div className="commit-options-toggle" onClick={() => setShowOpts((v) => !v)}><Icon name={showOpts ? 'chevron-down' : 'chevron-right'} /> Commit options</div>
           {showOpts ? (
             <div className="commit-options-body">
-              <label className="form-check"><input type="checkbox" checked={noVerify} onChange={(e) => setNoVerify(e.target.checked)} /> Skip git hooks (--no-verify)</label>
-              <label className="form-check"><input type="checkbox" checked={sign} onChange={(e) => setSign(e.target.checked)} /> Sign this commit (-S)</label>
+              <label className="form-check"><input type="checkbox" checked={pushAfter} onChange={(e) => setPushAfter(e.target.checked)} /> Push after committing</label>
+              <label className="form-check"><input type="checkbox" checked={noVerify} onChange={(e) => setNoVerify(e.target.checked)} /> Skip Git hooks</label>
             </div>
           ) : null}
         </div>
@@ -263,6 +271,7 @@ function CommitBox({ repo }: { repo: RepoView }) {
         <button className={`btn btn-success btn-commit${enabled ? '' : ' disabled'}`} disabled={!enabled} onClick={submit}>
           <Icon name="commit" /> {label}
         </button>
+        {amend && !inOp ? <button className="btn btn-default btn-commit btn-skip" onClick={() => A.setAmend(path, false)}>Cancel Amend</button> : null}
         {inOp ? (
           <>
             {state.kind === 'rebase' || state.kind === 'cherry-pick' || state.kind === 'am' ? <button className="btn btn-default btn-commit btn-skip" onClick={() => A.skipOp(path)}>Skip</button> : null}

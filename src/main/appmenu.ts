@@ -2,7 +2,9 @@
 // Items either run in the main process (window, zoom, devtools, relaunch) or are forwarded to the
 // renderer on the 'command' channel. Shortcuts the renderer already handles are shown in the menu but
 // not registered here (registerAccelerator: false), so they keep working inside the app's own inputs.
-import { app, BrowserWindow, Menu, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, Menu, shell, type MenuItemConstructorOptions } from 'electron'
+
+const REPO_URL = 'https://github.com/supermaty01/super-git'
 
 export interface MenuState {
   hasRepo: boolean
@@ -78,10 +80,22 @@ export function buildAppMenu(win: BrowserWindow | null): void {
         { label: 'Toggle Full Screen', accelerator: 'F11', visible: false, click: () => win?.setFullScreen(!win.isFullScreen()) },
         { type: 'separator' },
         { label: '&Increase Zoom', click: send('zoom:in'), ...shown('Control+=') },
+        { label: '&Increase Zoom', click: send('zoom:in'), accelerator: 'Control+numadd', visible: false },
         { label: 'Decrease Z&oom', click: send('zoom:out'), ...shown('Control+-') },
+        { label: 'Decrease Z&oom', click: send('zoom:out'), accelerator: 'Control+numsub', visible: false },
         { label: '&Reset Zoom', click: send('zoom:reset'), ...shown('Control+0') },
         { label: 'Developer', submenu: [{ label: 'Toggle Developer &Tools', click: () => win?.webContents.toggleDevTools(), ...shown('Control+Shift+I') }] },
         { label: 'Tabs', submenu: tabs },
+        {
+          label: 'Terminal Tabs', submenu: [
+            { label: 'Select Next Terminal Tab', click: send('term:next'), accelerator: 'Control+PageDown', enabled: state.terminal },
+            { label: 'Select Previous Terminal Tab', click: send('term:prev'), accelerator: 'Control+PageUp', enabled: state.terminal },
+            { label: 'New Terminal Tab', click: send('term:new'), accelerator: 'Control+Shift+N', enabled: state.terminal },
+            { label: 'Close Terminal Tab', click: send('term:close'), accelerator: 'Control+Shift+W', enabled: state.terminal },
+            { type: 'separator' },
+            ...Array.from({ length: 9 }, (_, i): MenuItemConstructorOptions => ({ label: `Select Terminal Tab ${i + 1}`, click: send(`term:${i + 1}`), accelerator: `Control+Shift+${i + 1}`, enabled: state.terminal }))
+          ]
+        },
         { label: 'Favorites', submenu: favorites },
         { type: 'separator' },
         { label: 'Show Left Panel', type: 'checkbox', checked: state.leftPanel, enabled: repo, click: send('panel:left'), accelerator: 'Control+J' },
@@ -96,7 +110,13 @@ export function buildAppMenu(win: BrowserWindow | null): void {
         { label: 'Keyboard Shortcuts', click: send('shortcuts'), ...shown('Control+/') },
         { type: 'separator' },
         { label: `About ${name}`, click: send('about') },
-        { label: `Version ${app.getVersion()} (${process.arch})`, enabled: false }
+        { label: `Version ${app.getVersion()} (${process.arch} ${process.arch.includes('64') ? '64' : '32'}-bit)`, enabled: false },
+        { label: 'View Release Notes', click: () => void shell.openExternal(`${REPO_URL}/releases`) },
+        { label: 'View Support Documentation', click: () => void shell.openExternal(`${REPO_URL}#readme`) },
+        { label: 'Support Logs', submenu: [{ label: 'View Activity Log', click: send('activity') }] },
+        { type: 'separator' },
+        { label: 'Browse or Submit Feature Requests', click: () => void shell.openExternal(`${REPO_URL}/issues`) },
+        { label: 'Report a Problem', click: () => void shell.openExternal(`${REPO_URL}/issues/new`) }
       ]
     }
   ]

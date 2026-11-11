@@ -69,6 +69,8 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
   const [sides, setSides] = useState<ConflictSides | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [picks, setPicks] = useState<Record<number, Pick>>({})
+  const [wrap, setWrap] = useState(false)
+  useEffect(() => { for (const ed of [eds.current.a, eds.current.b, eds.current.o]) ed?.updateOptions({ wordWrap: wrap ? 'on' : 'off' }) }, [wrap])
   const [current, setCurrent] = useState(0)
   const [dirty, setDirty] = useState(false)
   const font = useStore((s) => s.settings!.editorFont)
@@ -137,7 +139,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
       const ln = e.target.position?.lineNumber
       if (!ln) return
       const hit = lineMapRef.current[side].get(ln - 1)
-      if (hit) toggleRef.current(side, hit[0], hit[1])
+      if (hit) toggleRef.current(side, hit[0], 'all')
     }
     a.onMouseDown(onGlyph('a'))
     b.onMouseDown(onGlyph('b'))
@@ -162,6 +164,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
         const lines = side === 'a' ? c.a : c.b
         const start = side === 'a' ? c.aIndex : c.bIndex
         const chosen = picks[c.id]?.[side] ?? []
+        const whole = lines.length > 0 && chosen.length === lines.length
         lines.forEach((_, i) => {
           decs.push({
             range: new monaco.Range(start + i + 1, 1, start + i + 1, 1),
@@ -169,7 +172,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
               isWholeLine: true,
               className: side === 'a' ? 'mt-line-a' : 'mt-line-b',
               linesDecorationsClassName: side === 'a' ? 'mt-bar-a' : 'mt-bar-b',
-              glyphMarginClassName: `mt-check${chosen.includes(i) ? ' checked' : ''}`
+              glyphMarginClassName: i === 0 ? `mt-check${whole ? ' checked' : ''}` : undefined
             }
           })
         })
@@ -237,6 +240,8 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
         <span className="mt-file">{file}</span>
         <span className="text-secondary">({conflicts.length} conflict{conflicts.length === 1 ? '' : 's'})</span>
         <span className="grow" />
+        <button className={`toggle-btn icon-only${wrap ? ' checked' : ''}`} title="Word Wrap" onClick={() => setWrap(!wrap)}><Icon name="align-left" /></button>
+        <span className="fv-encoding">UTF-8</span>
         <button className="btn btn-primary-outline btn-small" onClick={() => A2.externalMergeTool(path, file)}>Open in external merge tool <Icon name="external" /></button>
         <button className="btn btn-success btn-small" onClick={save}>Save <Icon name="save" /></button>
         <span className="file-view-close" title="Close" onClick={() => A.closeCenter(path)}><Icon name="times" /></span>

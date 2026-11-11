@@ -11,6 +11,8 @@ import { RebaseView } from './RebaseView'
 import { Resizer } from './Resizer'
 import { TerminalPanel } from './TerminalPanel'
 import { ToolbarPrompt } from './ToolbarPrompt'
+import { WorktreePanel } from './WorktreePanel'
+import { FileHistoryView } from './FileHistoryView'
 
 export function RepoScreen() {
   const repo = useActiveRepo()
@@ -34,7 +36,7 @@ export function RepoScreen() {
     )
   }
   const center = repo.center
-  const fullWidth = center.kind === 'merge'
+  const fullWidth = center.kind === 'merge' || center.kind === 'history'
   const leftCollapsed = center.kind === 'file' || !layout.leftOpen
 
   return (
@@ -51,17 +53,19 @@ export function RepoScreen() {
           <div className="center-content">
             {repo.loading && !repo.snapshot ? <div className="loading"><div className="spinner" /></div> : null}
             {repo.snapshot ? (
-              center.kind === 'file' ? <DiffView repo={repo} ctx={center.ctx} startEditing={center.edit} />
+              center.kind === 'file' ? <DiffView repo={repo} ctx={center.ctx} startEditing={center.edit} startView={center.view} />
                 : center.kind === 'merge' ? <MergeTool repo={repo} file={center.file} />
+                : center.kind === 'history' ? <FileHistoryView key={`${center.file}:${center.sha ?? ''}:${center.blame ? 1 : 0}`} repo={repo} file={center.file} sha={center.sha} blame={center.blame} />
                   : center.kind === 'rebase' ? <RebaseView repo={repo} />
                     : <Graph key={`${theme}-${look}`} repo={repo} />
             ) : null}
           </div>
+          {repo.slidey?.kind === 'worktree' && repo.snapshot ? <WorktreePanel key={repo.slidey.ref} repo={repo} initialRef={repo.slidey.ref} /> : null}
           {repo.terminal ? <TerminalPanel path={repo.path} /> : null}
         </div>
         {!fullWidth && repo.snapshot ? (
           <>
-            {layout.rightOpen !== false ? <>
+            {layout.rightOpen !== false && !repo.detailHidden ? <>
             <Resizer onDrag={(dx) => setLayout({ rightWidth: Math.max(300, Math.min(900, useStore.getState().settings!.layout.rightWidth - dx)) })} onEnd={persist} />
               <DetailPanel repo={repo} width={layout.rightWidth} />
             </> : null}

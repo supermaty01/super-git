@@ -3,9 +3,9 @@ import type { RepoView } from '../store'
 import { useStore, setState, updateRepo } from '../store'
 import { api } from '../lib/api'
 import * as A from '../actions'
-import { fileMenu } from '../menus'
+import { fileMenu, stashMenu } from '../menus'
 import { avatarUrl } from '../lib/avatar'
-import { fullDate } from '../lib/format'
+import { fullDate, parseStash } from '../lib/format'
 import { Icon } from './Icon'
 import { FileList, FileListToolbar, summarizeFiles, StatusIcon } from './FileList'
 import { WipPanel } from './WipPanel'
@@ -93,13 +93,12 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
           <div className="commit-author-info">
             <div className="commit-author-name" title={commit.email}>{commit.author}</div>
             <div className="commit-author-date">authored <span>{fullDate(commit.date)}</span></div>
-            {committerDiffers ? <div className="commit-author-date">committed by {commit.committer} <span>{fullDate(commit.commitDate)}</span></div> : null}
             {sig ? <div className={`commit-signature sig-${sig.status === 'G' ? 'good' : sig.status === 'B' || sig.status === 'R' ? 'bad' : 'unknown'}`} title={`key ${sig.key}`}>
               <Icon name={sig.status === 'G' ? 'check-circle' : 'warning'} /> {sig.status === 'G' ? 'Verified signature' : sig.status === 'B' ? 'Bad signature' : sig.status === 'R' ? 'Revoked key' : sig.status === 'E' ? 'Signed (cannot verify — key missing)' : sig.status === 'X' || sig.status === 'Y' ? 'Signed (expired)' : 'Signed (unverified)'}{sig.signer ? ` · ${sig.signer}` : ''}
             </div> : null}
           </div>
           <div className="commit-parents">
-            {commit.parents.length ? <>parent{commit.parents.length > 1 ? 's' : ''}: {commit.parents.map((p, i) => (
+            {commit.parents.length ? <>parent: {commit.parents.map((p, i) => (
               <span key={p}>{i ? ',' : ''}<span className="commit-parent-link" onClick={() => { A.selectCommit(path, p); updateRepo(path, { focus: { sha: p, t: Date.now() } }) }}>{p.slice(0, 6)}</span></span>
             ))}</> : null}
           </div>
@@ -108,6 +107,15 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
           <div className="commit-coauthors">
             <span className="commit-coauthors-label">Co-authors:</span>
             {coAuthors.map((c) => <div key={c.email} className="commit-coauthor" title={`${c.name} <${c.email}>`} style={{ backgroundImage: `url(${avatarUrl(c.email, c.name)})` }} />)}
+          </div>
+        ) : null}
+        {committerDiffers ? (
+          <div className="commit-author-row committer-row">
+            <div className="commit-avatar" style={{ backgroundImage: `url(${avatarUrl(commit.committerEmail, commit.committer)})` }} />
+            <div className="commit-author-info">
+              <div className="commit-author-name" title={commit.committerEmail}>{commit.committer}</div>
+              <div className="commit-author-date">committed <span>{fullDate(commit.commitDate)}</span></div>
+            </div>
           </div>
         ) : null}
         <div className="file-summary">
@@ -139,11 +147,13 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
   const path = repo.path
   const [files, setFiles] = useState<FileChange[] | null>(null)
   const [untracked, setUntracked] = useState<Set<string>>(new Set())
+  const [info, setInfo] = useState<Commit | null>(null)
   const [mode, setMode] = useFileListMode()
   const [sortDesc, setSortDesc] = useState(false)
   useEffect(() => {
     let alive = true
     api.stashFiles(path, stash.sha).then((f) => alive && setFiles(f)).catch(() => alive && setFiles([]))
+    api.commitDetails(path, stash.sha).then((c) => alive && setInfo(c)).catch(() => undefined)
     if (stash.parents[2]) api.commitFiles(path, stash.parents[2]).then((f) => alive && setUntracked(new Set(f.map((x) => x.path)))).catch(() => undefined)
     return () => { alive = false }
   }, [path, stash.sha, stash.parents])
@@ -151,22 +161,29 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
     ? { kind: 'stash', sha: stash.parents[2], parent: undefined, path: f.path, status: 'A' }
     : { kind: 'stash', sha: stash.sha, parent: stash.parents[0], path: f.path, oldPath: f.oldPath, status: f.status }
   const active = repo.center.kind === 'file' && repo.center.ctx.kind === 'stash' ? repo.center.ctx.path : null
+  const { msg } = parseStash(stash.message)
+  const base = stash.parents[0]
   return (
-    <div className="commit-detail">
+    <div className="commit-detail" onContextMenu={(e) => { if ((e.target as HTMLElement).closest('.file-row')) return; e.preventDefault(); void stashMenu(path, stash) }}>
       <div className="commit-detail-header">
-        <span className="commit-sha-label">stash:</span>
-        <span className="commit-sha">stash@{'{'}{stash.index}{'}'}</span>
+        <span className="commit-sha-label">commit:</span>
+        <span className="commit-sha" title="Copy commit sha" onClick={() => api.copy(stash.sha)}>{stash.sha.slice(0, 6)}</span>
       </div>
       <div className="commit-detail-scroll">
-        <MessageBox><div className="commit-message-summary">{stash.message}</div></MessageBox>
-        <div className="stash-actions">
-          <button className="btn btn-primary btn-small" onClick={() => A.stashApply(path, stash.index)}>Apply Stash</button>
-          <button className="btn btn-success btn-small" onClick={() => A.stashPop(path, stash.index)}>Pop Stash</button>
-          <button className="btn btn-danger btn-small" onClick={() => A.stashDrop(path, stash)}>Delete Stash</button>
-          <button className="btn btn-default btn-small" onClick={() => A2.renameStash(path, stash)}>Edit message</button>
+        <MessageBox>
+          <div className="commit-message-summary stash-message-edit" title="Click to amend your stash message" onClick={() => A2.renameStash(path, stash)}>{msg}</div>
+        </MessageBox>
+        <div className="commit-author-row">
+          {info ? <div className="commit-avatar" style={{ backgroundImage: `url(${avatarUrl(info.email, info.author)})` }} /> : null}
+          <div className="commit-author-info">
+            {info ? <div className="commit-author-name" title={info.email}>{info.author}</div> : null}
+            <div className="commit-author-date">authored <span>{fullDate(info?.date ?? stash.date)}</span></div>
+          </div>
+          <div className="commit-parents">
+            {base ? <>parent: <span className="commit-parent-link" onClick={() => { A.selectCommit(path, base); updateRepo(path, { focus: { sha: base, t: Date.now() } }) }}>{base.slice(0, 6)}</span></> : null}
+          </div>
         </div>
-        <div className="commit-author-row"><div className="commit-author-info"><div className="commit-author-date">created <span>{fullDate(stash.date)}</span></div></div></div>
-        <div className="file-summary">{files ? summarizeFiles(files).map((x) => <span key={x.status} className="file-summary-item"><StatusIcon status={x.status} /> {x.count}</span>) : null}</div>
+        <FileSummary files={files} />
         <FileListToolbar mode={mode} setMode={setMode} sortDesc={sortDesc} setSortDesc={setSortDesc} />
         {files ? <FileList files={files} mode={mode} sortDesc={sortDesc} activePath={active} onOpen={(f) => A.openFile(path, ctxFor(f))} /> : null}
       </div>
@@ -174,31 +191,70 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
   )
 }
 
+/** "1 modified  2 added …", in the original's order */
+function FileSummary({ files }: { files: FileChange[] | null }) {
+  return (
+    <div className="file-summary">
+      {files ? summarizeFiles(files).map((x) => (
+        <span key={x.status} className="file-summary-item"><StatusIcon status={x.status} /> {x.count} {x.status === 'A' ? 'added' : x.status === 'D' ? 'deleted' : x.status === 'R' ? 'renamed' : 'modified'}</span>
+      )) : <span className="text-secondary">Loading…</span>}
+    </div>
+  )
+}
+
 function MultiPanel({ repo, shas }: { repo: RepoView; shas: string[] }) {
   const s = repo.snapshot!
-  const path = repo.path
+  // graph order, newest first
   const commits = useMemo(() => s.commits.filter((c) => shas.includes(c.sha)), [s.commits, shas])
+  if (commits.length === 2) return <TwoCommitsPanel repo={repo} cards={commits} a={commits[1].sha} b={commits[0].sha} caption="Viewing diff between 2 commits" />
+  // like the original: a contiguous range shows its combined diff, anything else only lists the commits
+  const contiguous = commits.length > 1 && commits.every((c, i) => i === commits.length - 1 || c.parents[0] === commits[i + 1].sha)
+  const base = commits[commits.length - 1]?.parents[0]
+  if (contiguous && base) return <TwoCommitsPanel repo={repo} cards={commits} a={base} b={commits[0].sha} caption={`Viewing diff of ${commits.length} commits`} title={`${shas.length} commits selected`} />
   return (
     <div className="commit-detail">
+      <WipBanner repo={repo} />
       <div className="commit-detail-header">{shas.length} commits selected</div>
       <div className="commit-detail-scroll">
-        <div className="multi-actions">
-          <button className="btn btn-primary btn-small" onClick={() => A.cherryPick(path, shas)}>Cherry pick {shas.length} commits</button>
-          <button className="btn btn-default btn-small" onClick={() => A.squashCommits(path, shas)}>Squash {shas.length} commits</button>
-          {shas.length === 2 ? <button className="btn btn-default btn-small" onClick={() => A2.compareCommits(path, shas[0], shas[1])}>Compare</button> : null}
-          <button className="btn btn-default btn-small" onClick={() => A2.createPatch(path, shas)}>Create patch</button>
-        </div>
-        <div className="multi-list">
-          {commits.map((c) => (
-            <div key={c.sha} className="multi-row" onClick={() => A.selectCommit(path, c.sha)}>
-              <div className="multi-avatar" style={{ backgroundImage: `url(${avatarUrl(c.email, c.author)})` }} />
-              <div className="multi-text">
-                <div className="truncate">{c.summary}</div>
-                <div className="text-secondary truncate">{c.sha.slice(0, 7)} · {c.author}</div>
-              </div>
-            </div>
-          ))}
-        </div>
+        {commits.map((c) => <CompareCard key={c.sha} path={repo.path} c={c} />)}
+        <div className="compare-caption multi-no-diff">A combined diff is not shown for this selection. Select a contiguous range of commits, or one or two items, to see their changes.</div>
+      </div>
+    </div>
+  )
+}
+
+function CompareCard({ path, c }: { path: string; c: Commit }) {
+  return (
+    <div className="compare-card" onClick={() => { A.selectCommit(path, c.sha); updateRepo(path, { focus: { sha: c.sha, t: Date.now() } }) }}>
+      <div className="compare-card-summary truncate">{c.summary}</div>
+      <div className="compare-card-meta"><span>{fullDate(c.date)} by {c.author}</span><span className="compare-card-sha">{c.sha.slice(0, 7)}</span></div>
+    </div>
+  )
+}
+
+function TwoCommitsPanel({ repo, cards, a, b, caption, title = '2 commits selected' }: { repo: RepoView; cards: Commit[]; a: string; b: string; caption: string; title?: string }) {
+  const path = repo.path
+  const [files, setFiles] = useState<FileChange[] | null>(null)
+  const [mode, setMode] = useFileListMode()
+  const [sortDesc, setSortDesc] = useState(false)
+  useEffect(() => {
+    let alive = true
+    setFiles(null)
+    api.compareFiles(path, a, b).then((f) => alive && setFiles(f)).catch(() => alive && setFiles([]))
+    return () => { alive = false }
+  }, [path, a, b])
+  const active = repo.center.kind === 'file' && repo.center.ctx.kind === 'compare' ? repo.center.ctx.path : null
+  const ctxFor = (f: FileChange): FileContext => ({ kind: 'compare', a, b, path: f.path, oldPath: f.oldPath, status: f.status })
+  return (
+    <div className="commit-detail">
+      <WipBanner repo={repo} />
+      <div className="commit-detail-header">{title}</div>
+      <div className="commit-detail-scroll">
+        <div className="compare-caption">{caption}</div>
+        {cards.map((c) => <CompareCard key={c.sha} path={path} c={c} />)}
+        <FileSummary files={files} />
+        <FileListToolbar mode={mode} setMode={setMode} sortDesc={sortDesc} setSortDesc={setSortDesc} />
+        {files ? <FileList files={files} mode={mode} sortDesc={sortDesc} activePath={active} onOpen={(f) => A.openFile(path, ctxFor(f))} /> : null}
       </div>
     </div>
   )

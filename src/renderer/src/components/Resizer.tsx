@@ -1,11 +1,12 @@
 import { useRef } from 'react'
 
 /** Vertical drag handle; reports horizontal deltas in CSS pixels. */
-export function Resizer({ onDrag, onEnd, className }: { onDrag: (dx: number) => void; onEnd?: () => void; className?: string }) {
+export function Resizer({ onDrag, onEnd, className, style }: { onDrag: (dx: number) => void; onEnd?: () => void; className?: string; style?: React.CSSProperties }) {
   const last = useRef(0)
   return (
     <div
       className={`resizer${className ? ' ' + className : ''}`}
+      style={style}
       onMouseDown={(e) => {
         e.preventDefault()
         last.current = e.clientX
