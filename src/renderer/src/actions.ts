@@ -3,7 +3,7 @@ import { api, bridge } from './lib/api'
 import {
   getState, setState, updateRepo, newRepoView, toast, openModal, showPrompt, MGMT_TAB, type RepoView, type Selection, type CenterView
 } from './store'
-import type { RepoSnapshot, Ref, Commit, FileChange, FileContext, OpResult, ResetMode, PullMode, RebaseTodoItem, Stash, Worktree, MenuItemSpec, TabInfo, AutoStash } from '@shared/types'
+import type { UpdateState, RepoSnapshot, Ref, Commit, FileChange, FileContext, OpResult, ResetMode, PullMode, RebaseTodoItem, Stash, Worktree, MenuItemSpec, TabInfo, AutoStash } from '@shared/types'
 import { errMsg, basename } from './lib/format'
 
 // ---------------------------------------------------------------------------------------------
@@ -24,6 +24,7 @@ export async function init(): Promise<void> {
   })
   bridge().onProgress((e) => setState({ progress: { repo: e.repo, text: e.text } }))
   bridge().onZoom((z) => setState((s) => ({ settings: s.settings ? { ...s.settings, zoom: z } : s.settings })))
+  bridge().onUpdate(onUpdate)
   window.addEventListener('focus', () => { const t = activeTab(); if (t) void refresh(t.path) })
   if (active !== MGMT_TAB) await activateTab(active)
   startAutoFetch()
@@ -37,6 +38,28 @@ export async function init(): Promise<void> {
   const folder = await api.takeStartupFolder().catch(() => null)
   if (folder) await openRepo(folder)
 }
+
+// ---------------------------------------------------------------------------------------------
+// automatic updates (downloaded in the background from the GitHub releases)
+
+let readyShown = ''
+function onUpdate(u: UpdateState & { manual: boolean }): void {
+  if (u.state === 'ready') {
+    if (readyShown === u.version) return
+    readyShown = u.version
+    toast({
+      kind: 'info', title: 'Update ready', message: `SuperGit ${u.version} has been downloaded. Restart to finish updating; your open tabs come back.`,
+      actions: [{ label: 'Restart to update', run: () => void api.installUpdate() }]
+    }, 0)
+    return
+  }
+  if (!u.manual) return
+  if (u.state === 'none') toast({ kind: 'success', title: 'SuperGit is up to date', message: `You have the latest version (${u.version}).` }, 4000)
+  else if (u.state === 'downloading') toast({ kind: 'info', title: `Downloading SuperGit ${u.version}`, message: 'You will be asked to restart once it is ready.' }, 4000)
+  else if (u.state === 'error') toast({ kind: 'error', title: 'Could not check for updates', message: u.message })
+  else if (u.state === 'unsupported') toast({ kind: 'info', title: 'Automatic updates are not available', message: u.reason }, 6000)
+}
+export const checkForUpdates = () => api.checkForUpdates(true)
 
 function activeTab(): TabInfo | undefined {
   const s = getState()

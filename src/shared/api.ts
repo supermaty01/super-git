@@ -1,4 +1,4 @@
-import type { AutoStash, UndoPreview,
+import type { AutoStash, UndoPreview, UpdateState,
   RepoSnapshot, WorkingStatus, FileChange, FileContext, FileContents, ConflictSides, BlameLine, Commit, ResetMode, PullMode,
   RebaseTodoItem, OpResult, Settings, MenuItemSpec, ProviderId, ProviderAccount, ProviderConnectOptions, HostedRepo, CommitOptions, StashMode, CommitStat, GitflowConfig, LfsInfo, SshKey, GpgKey, GitKrakenRepo
 } from './types'
@@ -33,6 +33,10 @@ export interface Api {
   gitInfo(): Promise<{ path: string; version: string; readOnly: boolean }>
   /** repositories open in GitKraken and what is hidden in each; null when it is not installed. Read-only. */
   gitkrakenScan(): Promise<GitKrakenRepo[] | null>
+  /** automatic updates: current state, a check (manual = from the Help menu), restart into the downloaded version */
+  updateStatus(): Promise<UpdateState>
+  checkForUpdates(manual: boolean): Promise<UpdateState>
+  installUpdate(): Promise<void>
   /** GitKraken preferences SuperGit has an equivalent for */
   gitkrakenSettings(): Promise<Partial<Settings>>
   /** the folder SuperGit was started with (Explorer "Open with SuperGit"), once */
@@ -195,6 +199,7 @@ export interface Events {
   onProgress(cb: (e: { repo: string; op: string; text: string }) => void): () => void
   onZoom(cb: (z: number) => void): () => void
   onCommand(cb: (cmd: string) => void): () => void
+  onUpdate(cb: (u: UpdateState & { manual: boolean }) => void): () => void
   onTermData(cb: (e: { id: number; data: string }) => void): () => void
   onTermExit(cb: (e: { id: number; code: number }) => void): () => void
 }

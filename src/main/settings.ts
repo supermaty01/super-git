@@ -56,6 +56,7 @@ const DEFAULTS: Settings = {
   sshPrivateKey: '',
   sshPublicKey: '',
   desktopNotifications: true,
+  autoUpdate: true,
   defaultSmartVisibility: false,
   pushAfterCommit: false,
   forcePushSkipSecondWarning: false,

@@ -111,6 +111,7 @@ export function buildAppMenu(win: BrowserWindow | null): void {
         { type: 'separator' },
         { label: `About ${name}`, click: send('about') },
         { label: `Version ${app.getVersion()} (${process.arch} ${process.arch.includes('64') ? '64' : '32'}-bit)`, enabled: false },
+        { label: 'Check for Updates...', click: send('app:check-updates') },
         { label: 'View Release Notes', click: () => void shell.openExternal(`${REPO_URL}/releases`) },
         { label: 'View Support Documentation', click: () => void shell.openExternal(`${REPO_URL}#readme`) },
         { label: 'Support Logs', submenu: [{ label: 'View Activity Log', click: send('activity') }] },

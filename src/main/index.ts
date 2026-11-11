@@ -12,6 +12,7 @@ import { buildAppMenu, setMenuState } from './appmenu'
 import * as ex from './extras'
 import * as term from './terminal'
 import * as undo from './undo'
+import * as updater from './updater'
 import { getSettings, updateSettings, flushSettings, addRecent } from './settings'
 import type { Api } from '../shared/api'
 import type { MenuItemSpec } from '../shared/types'
@@ -217,6 +218,9 @@ const api: Api = {
   providerDisconnect: (p) => providers.disconnect(p),
   providerRepos: (p) => providers.listRepos(p),
   gitkrakenScan: () => scanGitKraken(),
+  updateStatus: async () => updater.getStatus(),
+  checkForUpdates: (manual) => updater.check(manual),
+  installUpdate: () => updater.installNow(),
   gitkrakenSettings: () => gitkrakenSettings(),
   async takeStartupFolder() { const d = startupFolder; startupFolder = null; return d },
   /** set by the installer's "Import from GitKraken" option; read once */
@@ -490,6 +494,7 @@ else {
     nativeTheme.themeSource = getSettings().theme === 'light' ? 'light' : 'dark'
     createWindow()
     buildAppMenu(win)
+    if (win) updater.initUpdater(win)
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
   })
 }

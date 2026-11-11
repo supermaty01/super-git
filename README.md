@@ -6,7 +6,9 @@ A lightweight, local-only desktop Git client for Windows, centred on a fast, rea
 
 1. Install [Git for Windows](https://git-scm.com/download/win) if you don't have it (SuperGit runs on top of it; the installer offers the download page when Git is missing).
 2. Download the latest **`SuperGit-Setup-<version>.exe`** from [Releases](https://github.com/supermaty01/super-git/releases/latest) and run it. It installs for your user only (no administrator rights needed), lets you pick the folder or install for all users, and adds a Start menu shortcut. Its options page also offers a desktop shortcut, "Open with SuperGit" in the Explorer folder menu, and importing the repositories (and matching preferences) you have open in GitKraken.
-3. Prefer not to install? Download **`SuperGit-<version>-portable.exe`** from the same page and run it from anywhere.
+3. Prefer not to install? Download **`SuperGit-<version>-portable.exe`** from the same page and run it from anywhere. The portable version does not update itself.
+
+From 1.3.0 on, the installed app updates itself: it checks GitHub in the background, downloads new versions quietly and asks you to **Restart to update**. **Help > Check for Updates** checks right away; Preferences > General can turn the automatic check off.
 
 The installers are not code-signed yet, so Windows SmartScreen may show "Windows protected your PC": choose **More info → Run anyway**. Installing a newer version over an older one keeps your settings and open tabs.
 

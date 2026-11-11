@@ -338,6 +338,8 @@ export interface Settings {
   sshPublicKey: string
   /** desktop notifications for messages shown while SuperGit is in the background */
   desktopNotifications: boolean
+  /** check GitHub for new versions and download them in the background */
+  autoUpdate: boolean
   /** branch visibility for repositories opened for the first time */
   defaultSmartVisibility: boolean
 }
@@ -434,6 +436,16 @@ export interface OpResult {
 }
 
 export type AutoStash = 'popped' | 'kept'
+
+/** automatic update progress (installed copies only) */
+export type UpdateState =
+  | { state: 'idle' }
+  | { state: 'checking' }
+  | { state: 'none'; version: string }
+  | { state: 'downloading'; version: string; percent: number }
+  | { state: 'ready'; version: string }
+  | { state: 'error'; message: string }
+  | { state: 'unsupported'; reason: string }
 
 /** Undo / Redo toolbar state: enabled, its tooltip, and (reset/rebase over local changes) the branch to stash first */
 export interface UndoPreview { valid: boolean; tip: string; needsStash?: string }

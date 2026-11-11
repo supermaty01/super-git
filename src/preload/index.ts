@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('bridge', {
   onProgress: (cb: (e: unknown) => void) => on('progress', cb),
   onZoom: (cb: (z: number) => void) => on('zoom', cb),
   onCommand: (cb: (c: string) => void) => on('command', cb),
+  onUpdate: (cb: (u: unknown) => void) => on('update', cb),
   onTermData: (cb: (e: unknown) => void) => on('term-data', cb),
   onTermExit: (cb: (e: unknown) => void) => on('term-exit', cb)
 })

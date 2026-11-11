@@ -26,6 +26,7 @@ export function runCommand(cmd: string): void {
   const typing = () => { const a = document.activeElement as HTMLElement | null; return !!a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable || !!a.closest('.monaco-editor')) }
   if (cmd.startsWith('tab:') && /^tab:\d$/.test(cmd)) { const id = s.tabs[Number(cmd.slice(4)) - 1]?.id; if (id) void A.activateTab(id); return }
   if (cmd.startsWith('term:')) { window.dispatchEvent(new CustomEvent('sg-terminal', { detail: cmd.slice(5) })); return }
+  if (cmd === 'app:check-updates') { void A.checkForUpdates(); return }
   if (cmd.startsWith('open:')) { void A.openRepo(cmd.slice(5)); return }
   if (cmd.startsWith('favorite:')) { const p = s.settings!.favorites[Number(cmd.slice(9)) - 1]; if (p) void A.openRepo(p); return }
   switch (cmd) {

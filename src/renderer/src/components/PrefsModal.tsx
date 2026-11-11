@@ -190,6 +190,7 @@ function GeneralSection() {
         <input className="form-control" value={settings.defaultCloneDir} onChange={(e) => saveSettings({ defaultCloneDir: e.target.value })} />
       </Row>
       <Num k="autoFetchMinutes" label="Auto-Fetch Interval (minutes)" min={0} max={60} help="0 turns automatic fetching off." />
+      <Check k="autoUpdate" label="Check for updates automatically" help="Download new versions of SuperGit from GitHub in the background; you choose when to restart. Help > Check for Updates checks right away." />
       <Check k="autoPrune" label="Auto-Prune" help="Remove remote-tracking branches that were deleted on the remote when fetching." />
       <Row label="Default pull behaviour">
         <select className="form-control" value={settings.defaultPullMode} onChange={(e) => saveSettings({ defaultPullMode: e.target.value as PullMode })}>
