@@ -1,0 +1,87 @@
+/* ===== shell UI parity round 2: status bar, command palette, shortcuts modal, terminal, top-right cluster ===== */
+
+/* status bar */
+.status-right { gap: 10px; }
+.status-icon { width: 22px; height: 22px; padding: 5px; box-sizing: border-box; justify-content: center; color: rgba(255,255,255,.78); }
+.status-icon:hover { color: #fff; }
+.status-zoom { display: inline-flex; align-items: center; gap: 4px; color: rgba(255,255,255,.78); cursor: pointer; }
+.status-zoom:hover { color: #fff; }
+.status-zoom select { background: var(--panel__bg0); color: inherit; border: 0; outline: none; font: inherit; font-size: 1.2rem; cursor: pointer; padding: 0; }
+.status-zoom select option { background: var(--panel__bg1); color: #fff; }
+.status-version { background: var(--panel__bg0); border: 0; font: inherit; font-size: 1.2rem; color: rgba(255,255,255,.65); cursor: pointer; padding: 0 4px; }
+.status-version:hover { color: #fff; }
+
+/* command palette */
+.palette-overlay { background: rgba(0,0,0,.5); padding-top: 82px; }
+.palette { box-shadow: none; overflow: visible; }
+.palette-input { background: rgb(30,33,36); border: 1.8px solid rgb(77,136,255); box-shadow: 0 0 0 1px rgb(77,136,255); border-radius: 4px 4px 0 0; padding: 0 10px; gap: 6px; }
+.palette-input input { color: rgba(255,255,255,.78); padding: 8px 0; }
+.palette-input input::placeholder { color: rgba(255,255,255,.45); }
+.palette-chip { display: inline-flex; align-items: center; gap: 6px; background: rgba(77,136,255,.25); color: #fff; font-weight: 600; font-size: 1.2rem; padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+.palette-chip .palette-chip-x { cursor: pointer; font-size: 1rem; opacity: .8; }
+.palette-chip .palette-chip-x:hover { opacity: 1; }
+.palette-list { max-height: 200px; background: rgb(21,23,25); border: .9px solid rgba(255,255,255,.08); border-top: 0; border-radius: 0 0 4px 4px; box-shadow: 0 5px 15px rgba(0,0,0,.4); }
+.palette-item { min-height: 40px; box-sizing: border-box; padding: 8px 10px; border-bottom: 0; }
+.palette-item.active { background: rgba(77,136,255,.2); }
+.palette-empty { padding: 8px 10px; min-height: 40px; box-sizing: border-box; display: flex; align-items: center; font-size: 1.4rem; color: var(--text-secondary); }
+.palette-item .bold.color-blue { font-weight: 600; color: rgb(77,136,255); }
+
+/* terminal: 275px (30px toolbar + 245px), everything on black, tabs are chips named after the shell executable */
+.terminal-panel { background: #000; border-top: .9px solid rgba(255,255,255,.08); }
+[data-theme="light"] .terminal-panel { background: #000; }
+.terminal-resize { top: -10px; height: 10px; }
+.terminal-header { flex: 0 0 30px; box-sizing: border-box; background: #000; padding: 0 10px; gap: 4px; border-bottom: .9px solid rgba(255,255,255,.08); }
+.terminal-tabs { align-items: center; gap: 4px; }
+.terminal-tab { border-bottom: 0; border-radius: 4px; padding: 2px 8px; color: rgba(255,255,255,.65); }
+.terminal-tab.active { background: rgba(255,255,255,.28); color: #fff; border-bottom: 0; }
+.terminal-btn { padding: 0 5px; width: 25px; box-sizing: border-box; justify-content: center; align-items: center; font-size: 1.2rem; color: rgba(255,255,255,.65); }
+.terminal-btn:hover { color: #fff; }
+.terminal-host { padding: 12px 0 12px 12px; background: #000; }
+
+/* keyboard shortcuts modal */
+.modal-overlay:has(.shortcuts-modal) { padding-top: 82px; }
+.shortcuts-modal { width: 675px; max-width: 95vw; background: rgb(30,33,36); border: .9px solid rgba(0,0,0,.2); border-radius: 0; box-shadow: none; }
+.shortcuts-modal .modal-header.shortcuts-header { height: 46.6px; box-sizing: border-box; padding: 10px 20px; background: rgb(39,43,47); border-bottom: .9px solid rgba(255,255,255,.08); display: flex; align-items: center; gap: 10px; }
+.shortcuts-title { font-size: 1.8rem; font-weight: 500; color: #fff; }
+.shortcuts-self { display: inline-flex; gap: 4px; margin-left: 4px; }
+.shortcuts-modal kbd { background: #fff; color: #000; border: 0; border-radius: 3px; padding: 0 5px; min-width: 0; height: 19.1px; line-height: 19px; font-family: inherit; font-size: 1.4rem; text-align: center; }
+.shortcuts-self kbd { font-size: 1.8rem; height: auto; line-height: 24px; }
+.shortcuts-filter { margin-left: auto; position: relative; display: inline-flex; align-items: center; }
+.shortcuts-filter input { width: 166px; height: 21px; box-sizing: border-box; font-size: 1.2rem; background: rgba(0,0,0,.2); border: .9px solid rgba(255,255,255,.08); border-radius: 3px; color: #fff; padding: 0 24px 0 6px; outline: none; }
+.shortcuts-filter .icon { position: absolute; right: 6px; font-size: 1.1rem; color: rgba(255,255,255,.45); pointer-events: none; }
+.shortcuts-modal .modal-close { font-size: 2rem; cursor: pointer; color: rgba(255,255,255,.78); }
+.shortcuts-modal .keymapContainer { height: 410px; max-height: 70vh; overflow-y: auto; padding: 0 0 0 40px; }
+.shortcuts-modal .shortcut-group-title { margin: 12px 0 0; font-size: 1.8rem; font-weight: 500; color: #fff; text-transform: none; }
+.shortcuts-modal hr { border: 0; border-top: .9px solid rgba(255,255,255,.2); margin: 8px 0; }
+.shortcuts-modal .shortcut-row { justify-content: flex-start; height: 20px; padding: 0; margin-bottom: 10px; border-bottom: 0; gap: 10px; font-size: 1.4rem; }
+.shortcuts-modal .shortcut-label { color: rgba(255,255,255,.78); }
+.shortcuts-modal .shortcut-keys { gap: 4px; margin-left: auto; margin-right: 40px; }
+.shortcuts-modal .shortcut-or { color: rgba(255,255,255,.78); font-size: 1.4rem; margin: 0 4px; }
+
+/* top-right cluster: 28x28 buttons with a blue hover, profile button with a 20px avatar */
+.tabs-right { gap: 5px; padding: 0 11px 0 5px; align-items: center; }
+.tabs-right-btn { width: 28px; height: 28px; box-sizing: border-box; padding: 0; align-items: center; justify-content: center; border-radius: 2px; font-size: 1.8rem; color: rgba(255,255,255,.9); }
+.tabs-right-btn:hover, .tabs-right-btn.active { background: rgba(77,136,255,.15); color: #fff; }
+.tab-list-btn { border-radius: 2px; }
+.tabs-profile { height: 28px; box-sizing: border-box; padding: 0 8px; gap: 6px; border-radius: 2px; font-size: 1.2rem; }
+.tabs-profile:hover, .tabs-profile.active { background: rgba(77,136,255,.15); color: #fff; }
+.tabs-profile-avatar { border-radius: 2px; }
+.bell-badge { top: 0; right: 0; min-width: 12px; height: 12px; line-height: 12px; padding: 0; font-size: .8rem; font-weight: 600; border-radius: 6px; background: rgb(77,136,255); }
+
+/* notifications popover */
+.notifications-dropdown { right: 177px; width: 450px; background: rgb(46,50,56); border: 0; border-radius: 2px; box-shadow: 0 6px 12px rgba(0,0,0,.176); }
+.notifications-header { border-bottom-color: rgba(255,255,255,.08); }
+
+/* profile popover */
+.profile-popover { position: absolute; z-index: 70; top: var(--tabs-bar-height); right: 11px; width: 330px; background: rgb(46,50,56); border-radius: 2px; box-shadow: 0 6px 12px rgba(0,0,0,.176); padding: 12px; color: rgba(255,255,255,.9); font-size: 1.3rem; }
+.profile-popover h4 { margin: 0 0 8px; font-size: 1.4rem; font-weight: 600; color: #fff; }
+.profile-popover .pp-section { margin-top: 14px; }
+.profile-popover .pp-card { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 3px; background: rgb(30,33,36); cursor: pointer; border: .9px solid transparent; }
+.profile-popover .pp-card.current { border-color: rgba(77,136,255,.6); }
+.profile-popover .pp-card:hover { background: rgb(35,38,42); }
+.profile-popover .pp-card + .pp-card { margin-top: 6px; }
+.profile-popover .pp-avatar { width: 28px; height: 28px; border-radius: 2px; background-size: cover; background-color: rgb(77,136,255); display: inline-flex; align-items: center; justify-content: center; font-weight: 600; color: #fff; flex: 0 0 auto; }
+.profile-popover .pp-name { font-weight: 600; color: #fff; }
+.profile-popover .pp-sub { color: rgba(255,255,255,.65); font-size: 1.2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-popover .pp-manage { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 6px 4px; cursor: pointer; color: rgb(64,197,236); }
+.profile-popover .pp-manage:hover { text-decoration: underline; }

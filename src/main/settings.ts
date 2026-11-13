@@ -10,7 +10,7 @@ const DEFAULTS: Settings = {
   fileListMode: 'path',
   defaultPullMode: 'ff',
   commitLimit: 2000,
-  layout: { leftWidth: 300, rightWidth: 420, refColWidth: 150, graphColWidth: 0, leftOpen: true },
+  layout: { leftWidth: 208, rightWidth: 400, refColWidth: 130, graphColWidth: 0, leftOpen: true },
   defaultCloneDir: path.join(os.homedir(), 'source', 'repos'),
   azure: { orgUrl: '', hasToken: false },
   tabs: [],
@@ -23,12 +23,14 @@ const DEFAULTS: Settings = {
   hiddenRefs: {},
   soloRefs: {},
   autoFetchMinutes: 1,
-  theme: 'dark',
-  graphColumns: { ref: true, graph: true, message: true, author: false, date: false, sha: false, changes: false },
+  theme: 'gk-dark',
+  graphColumns: { ref: true, graph: true, message: true, author: true, date: true, sha: true, changes: false },
+  graphLayoutVersion: 2,
+  lazyLoadCommits: true,
   graphShow: { tags: true, stashes: true, remotes: true },
   externalEditor: 'code',
   terminalShell: 'powershell',
-  terminalHeight: 260,
+  terminalHeight: 275,
   pinnedRefs: {},
   smartVisibility: {},
   compactGraph: false,
@@ -92,6 +94,7 @@ export function getSettings(): Settings {
     graphColumns: { ...DEFAULTS.graphColumns, ...(loaded.graphColumns ?? {}) },
     graphShow: { ...DEFAULTS.graphShow, ...(loaded.graphShow ?? {}) }
   }
+  migrateGraphColumns(cache, loaded)
   if (!cache.profiles?.length) cache.profiles = DEFAULTS.profiles
   cache.integrations = { ...(loaded.integrations ?? {}) }
   cache.azure.hasToken = existsSync(tokenFile())
@@ -100,6 +103,19 @@ export function getSettings(): Settings {
     cache.integrations.azure = { provider: 'azure', host: cache.azure.orgUrl, username: cache.azure.userName ?? '', displayName: cache.azure.userName, method: 'token', connectedAt: Date.now() }
   }
   return cache
+}
+
+/**
+ * Settings saved before the graph columns followed the original's defaults: the whole settings object is
+ * saved, so the old defaults (Author / Date / Sha hidden, 150 px branch column) are indistinguishable from a
+ * choice. Columns and width still at those old defaults move to the new ones; anything the user changed stays.
+ */
+function migrateGraphColumns(s: Settings, loaded: Partial<Settings>): void {
+  if ((loaded.graphLayoutVersion ?? 0) >= 2 || !Object.keys(loaded).length) return
+  const c = loaded.graphColumns
+  if (!c || (!c.author && !c.date && !c.sha)) s.graphColumns = { ...s.graphColumns, author: true, date: true, sha: true }
+  if (!loaded.layout || loaded.layout.refColWidth === 150) s.layout = { ...s.layout, refColWidth: 130 }
+  s.graphLayoutVersion = 2
 }
 
 export function updateSettings(patch: Partial<Settings>): Settings {

@@ -29,6 +29,13 @@ test('an undone action is skipped (its undo entry pairs with it) and redo replay
   assert.equal(r.undoRedoMessage, 'commit: second')
 })
 
+test('the no-op reset entries written by stash do not hide a merge', () => {
+  const list = [e(B, B, 'reset: moving to HEAD'), e(A, B, "merge origin/main: Merge made by the 'ort' strategy."), e(A, A, 'reset: moving to HEAD')]
+  const n = findNext(list, UNDO)
+  assert.equal(n.valid, false)
+  assert.equal(n.originalMessage, "merge origin/main: Merge made by the 'ort' strategy.")
+})
+
 test('unsupported actions (merge, pull, cherry-pick) block undo; the initial commit cannot be undone', () => {
   assert.equal(findNext([e(A, B, "merge dev: Merge made by the 'ort' strategy.")], UNDO).valid, false)
   assert.equal(findNext([e(A, B, 'pull: Fast-forward')], UNDO).originalMessage, 'pull: Fast-forward')

@@ -1,0 +1,73 @@
+/* Left panel geometry and colours, measured on GitKraken Desktop 12.6.2 (loaded after the other stylesheets) */
+
+/* top strip: 60px with the Viewing line and the filter box */
+.lp-top { box-sizing: border-box; height: 60px; padding: 4px 10px 0; }
+.lp-viewing { gap: 0; height: 22px; line-height: 18px; font-size: 12px; }
+.lp-viewing-count { margin-left: 5px; color: var(--text-accent); font-weight: 600; }
+.lp-collapse {
+  box-sizing: border-box; width: 21.8px; height: 21.8px; padding: 2px; margin-right: 4px; border: .9px solid transparent; border-radius: 2px;
+  align-items: center; justify-content: center; font-size: 16px; color: rgba(255, 255, 255, .7);
+}
+.lp-filter { margin-top: 6px; }
+.lp-filter input {
+  box-sizing: border-box; height: 21px; padding: 1px 5px; font-size: 12px; border: .9px solid rgba(255, 255, 255, .08); border-radius: 3px; background: rgba(0, 0, 0, .2);
+}
+.lp-filter input:focus { border-color: rgb(77, 136, 255); box-shadow: rgb(77, 136, 255) 0 0 0 1px; }
+.lp-filter-icon { top: 0; bottom: 0; right: 5px; display: flex; align-items: center; font-size: 12px; cursor: default; }
+.lp-filter-icon.clear { cursor: pointer; }
+.lp-top:has(.lp-viewing.filtering) { background: rgba(77, 136, 255, .5); }
+.lp-show-all { margin-right: 6px; color: var(--text-normal); font-weight: 400; }
+.lp-show-all:hover { text-decoration: none; }
+.lp-viewing.filtering .lp-show-all { color: var(--text-normal); }
+.filter-match { background: rgba(77, 136, 255, .5); }
+
+/* section headers */
+.lp-header { gap: 0; padding-right: 10px; }
+.lp-header .lp-chevron { flex: 0 0 15px; width: 15px; height: 12px; margin-left: 5px; font-size: 12px; }
+.lp-header .lp-header-icon { flex: 0 0 15px; width: 15px; height: 12px; margin: 0 5px; font-size: 12px; color: var(--text-disabled); }
+.lp-header .hover-show { margin-left: 6px; }
+
+/* rows: default cursor, no hover recolouring, 15px icon box */
+.lp-row { cursor: default; gap: 0; padding-right: 0; }
+.lp-row:not(.current):hover { color: var(--text-normal); }
+.lp-row > .lp-icon, .lp-row:hover > .lp-icon, .lp-remote > .lp-icon { color: var(--text-disabled); }
+.lp-row > .lp-icon { flex: 0 0 15px; width: 15px; min-width: 15px; margin: 0 5px 0 0; justify-content: center; }
+.lp-lead { box-sizing: border-box; flex: 0 0 25px; width: 25px; padding-left: 5px; padding-right: 5px; justify-content: flex-start; }
+.lp-lead .lp-eye { width: 15px; justify-content: center; font-size: 12px; }
+.lp-lead .lp-eye.always { color: var(--text-normal); }
+.lp-row.is-hidden { opacity: .5; }
+.lp-row.is-hidden .lp-label, .lp-row.is-hidden > .lp-icon { opacity: 1; }
+.lp-right { gap: 0; margin-left: 0; }
+.lp-right .lp-solo-badge { margin-left: 5px; }
+.lp-name .lp-on-branch { color: var(--text-disabled); }
+
+/* ahead / behind: "2↑ 1↓" */
+.lp-track { margin-left: 0; gap: 0; align-items: center; font-size: 10px; color: var(--text-normal); }
+.lp-track > span { display: inline-flex; align-items: center; margin-left: 5px; }
+.lp-track .lp-long { width: 6.3px; height: 10px; margin-left: 2px; }
+
+/* the ⋮ button: thin glyph with 5px either side */
+.lp-ellipsis { flex: 0 0 13.5px; width: 13.5px; cursor: pointer; color: var(--text-secondary); }
+.lp-ellipsis .lp-dots { width: 3.5px; height: 14px; }
+
+/* every list keeps an 11px scrollbar gutter; the thumb is 8px wide, inset 3px */
+.lp-body { overflow-y: scroll; }
+.lp-body::-webkit-scrollbar { width: 11px; }
+.lp-body::-webkit-scrollbar-thumb { background-color: var(--scroll-thumb-bg); background-clip: padding-box; border: 0 solid transparent; border-right-width: 3px; border-radius: 5px; }
+
+/* per-section height handle */
+.lp-section { position: relative; }
+.lp-resize-handle { position: absolute; left: 0; right: 0; bottom: 0; height: 10px; z-index: 3; cursor: row-resize; }
+body.resizing-rows, body.resizing-rows * { cursor: row-resize !important; user-select: none; }
+
+/* panel edge handle: 7px, centred on the edge */
+.left-resizer { flex: 0 0 7px; margin: 0 -3.5px; }
+
+/* collapsed rail */
+.left-strip { box-sizing: border-box; flex: 0 0 36.4px; border-right: 1px solid rgb(39, 41, 43); }
+
+/* tooltips inside the left panel: bootstrap look of the original */
+.gk-tooltip.lp-tip {
+  max-width: 500px; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; line-height: 17.14px; opacity: .9; animation: lp-tip-in .15s linear;
+}
+@keyframes lp-tip-in { from { opacity: 0; } to { opacity: .9; } }

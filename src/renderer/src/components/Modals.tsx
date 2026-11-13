@@ -7,7 +7,9 @@ import { Icon } from './Icon'
 import { PrefsModal, RepoPrefsModal, ShortcutsModal } from './PrefsModal'
 import { GITIGNORE_TEMPLATES, LICENSES, licenseText } from '../lib/templates'
 import type { Remote, PullMode, ProviderId } from '@shared/types'
-import { PROVIDERS, ProviderRepos } from './Integrations'
+import { CloneModal, InitModal } from './RepoModals'
+import { BranchCleanupModal } from './BranchCleanup'
+import { HostKeyChangedModal, InvalidSslModal } from './K2Modals'
 
 export function Modals() {
   const modal = useStore((s) => s.modal)
@@ -21,7 +23,7 @@ export function Modals() {
   let body: ReactNode = null
   switch (modal.kind) {
     case 'prompt': body = <PromptModal {...(p as unknown as PromptProps)} />; break
-    case 'clone': body = <CloneModal />; break
+    case 'clone': body = <CloneModal url={p.url as string | undefined} />; break
     case 'init': body = <InitModal />; break
     case 'prefs': body = <PrefsModal section={p.section as string | undefined} />; break
     case 'repoPrefs': body = <RepoPrefsModal path={p.path as string} section={p.section as string | undefined} />; break
@@ -29,9 +31,12 @@ export function Modals() {
     case 'activity': body = <ActivityModal />; break
     case 'push': body = <PushModal path={p.path as string} branch={p.branch as string} />; break
     case 'remote': body = <RemoteModal path={p.path as string} remote={p.remote as Remote | undefined} />; break
+    case 'branchCleanup': body = <BranchCleanupModal path={p.path as string} />; break
+    case 'hostKeyChanged': body = <HostKeyChangedModal host={p.host as string} remote={p.remote as string | undefined} detail={p.detail as string} />; break
+    case 'invalidSsl': body = <InvalidSslModal url={p.url as string} detail={p.detail as string} path={p.path as string | null} />; break
   }
   return (
-    <div className={`modal-overlay${modal.kind === 'prefs' || modal.kind === 'repoPrefs' ? ' prefs-overlay' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget) closeModal() }}>
+    <div className={`modal-overlay${modal.kind === 'prefs' || modal.kind === 'repoPrefs' ? ' prefs-overlay' : ''}`} onMouseDown={(e) => { if (e.target === e.currentTarget && modal.kind !== 'branchCleanup') closeModal() }}>
       {body}
     </div>
   )
@@ -77,186 +82,6 @@ function PromptModal({ title, okLabel, fields, onOk }: PromptProps) {
           )}
         </label>
       ))}
-    </ModalFrame>
-  )
-}
-
-// ---------------------------------------------------------------------------------------------
-
-function repoNameFromUrl(url: string): string {
-  const clean = url.trim().replace(/\/+$/, '').replace(/\.git$/, '')
-  const last = clean.split(/[/:]/).pop() ?? ''
-  try { return decodeURIComponent(last) } catch { return last }
-}
-
-function useCloneProgress(active: boolean) {
-  const progress = useStore((s) => s.progress)
-  return active ? progress?.text ?? 'Starting…' : ''
-}
-
-function CloneModal() {
-  const settings = useStore((s) => s.settings!)
-  const integrations = settings.integrations
-  const [tab, setTab] = useState<'url' | ProviderId>('url')
-  const [dir, setDir] = useState(settings.defaultCloneDir)
-  const [url, setUrl] = useState('')
-  const [shallow, setShallow] = useState(false)
-  const [branch, setBranch] = useState('')
-  const [recurse, setRecurse] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const progress = useCloneProgress(busy)
-  const name = repoNameFromUrl(url)
-  const full = name ? `${dir.replace(/[\\/]+$/, '')}\\${name}` : ''
-
-  const clone = async (u = url, n = name) => {
-    if (!u.trim() || !n) return
-    const dest = `${dir.replace(/[\\/]+$/, '')}\\${n}`
-    setBusy(true)
-    try {
-      await api.cloneRepo(u.trim(), dest, { shallow, branch: branch.trim() || undefined, recurse })
-      void api.setSettings({ defaultCloneDir: dir })
-      setState((s) => ({ settings: { ...s.settings!, defaultCloneDir: dir }, progress: null }))
-      closeModal()
-      toast({ kind: 'success', title: `Successfully cloned repo '${n}'` })
-      await A.openRepo(dest)
-    } catch (e) {
-      const msg = errMsg(e)
-      if (msg.startsWith('SUBMODULES:')) {
-        // the repository itself is there: open it and say which part failed
-        void api.setSettings({ defaultCloneDir: dir })
-        closeModal()
-        toast({ kind: 'info', title: `Cloned '${n}', but some submodules could not be fetched`, message: msg.slice('SUBMODULES:'.length).trim().slice(0, 300) }, 10000)
-        await A.openRepo(dest)
-      } else toast({ kind: 'error', title: 'Clone failed', message: msg.split('\n').slice(0, 4).join('\n').slice(0, 400) })
-    } finally {
-      setBusy(false)
-      setState({ progress: null })
-    }
-  }
-
-  const dirRow = (
-    <div className="form-grid-row">
-      <span className="form-label">Where to clone to</span>
-      <input className="form-control" value={dir} onChange={(e) => setDir(e.target.value)} />
-      <button className="btn btn-primary btn-small" onClick={async () => { const d = await api.pickDirectory('Where to clone to', dir); if (d) setDir(d) }}>Browse</button>
-    </div>
-  )
-
-  return (
-    <div className="modal clone-modal">
-      <div className="modal-header">
-        <span>Clone a Repository</span>
-        <span className="modal-close" onClick={() => !busy && closeModal()}><Icon name="times" /></span>
-      </div>
-      <div className="clone-layout">
-        <div className="clone-nav">
-          <div className={`clone-nav-item${tab === 'url' ? ' active' : ''}`} onClick={() => setTab('url')}><Icon name="link" /> Clone with URL</div>
-          {PROVIDERS.map((p) => (
-            <div key={p.id} className={`clone-nav-item${tab === p.id ? ' active' : ''}`} onClick={() => setTab(p.id)}>
-              <Icon name={p.icon} /> {p.name}{integrations[p.id] ? <span className="integrations-dot" /> : null}
-            </div>
-          ))}
-        </div>
-        <div className="clone-content">
-          {tab === 'url' ? (
-            <>
-              <div className="clone-title">Clone a Repo</div>
-              {dirRow}
-              <div className="form-grid-row">
-                <span className="form-label">URL</span>
-                <input className="form-control" autoFocus value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void clone() }} />
-                <span />
-              </div>
-              <div className="form-grid-row">
-                <span className="form-label">Branch</span>
-                <input className="form-control" placeholder="(default branch)" value={branch} onChange={(e) => setBranch(e.target.value)} />
-                <span />
-              </div>
-              <div className="form-grid-row">
-                <span className="form-label">Shallow Clone</span>
-                <input type="checkbox" checked={shallow} onChange={(e) => setShallow(e.target.checked)} />
-                <span />
-              </div>
-              <div className="form-grid-row">
-                <span className="form-label">Include submodules</span>
-                <input type="checkbox" checked={recurse} onChange={(e) => setRecurse(e.target.checked)} />
-                <span />
-              </div>
-              {full ? <div className="form-grid-row"><span className="form-label">Full path</span><span className="text-secondary full-path">{full}</span><span /></div> : null}
-              <div className="clone-actions">
-                {busy ? <span className="clone-progress"><Icon name="spinner" spin /> {progress}</span> : null}
-                <button className="btn btn-success btn-small" disabled={busy || !name} onClick={() => clone()}>Clone the repo!</button>
-              </div>
-            </>
-          ) : (
-            <ProviderRepos key={tab} provider={tab} dirRow={dirRow} busy={busy} progress={progress} onClone={(r) => clone(r.cloneUrl, r.name)} />
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------------------------
-
-function InitModal() {
-  const settings = useStore((s) => s.settings!)
-  const [dir, setDir] = useState(settings.defaultCloneDir)
-  const [name, setName] = useState('')
-  const [gitignore, setGitignore] = useState('None')
-  const [license, setLicense] = useState('None')
-  const [readme, setReadme] = useState(true)
-  const [branch, setBranch] = useState('main')
-  const full = name ? `${dir.replace(/[\\/]+$/, '')}\\${name}` : ''
-  const init = async () => {
-    if (!full) return
-    try {
-      const files: Record<string, string> = {}
-      if (gitignore !== 'None') files['.gitignore'] = GITIGNORE_TEMPLATES[gitignore]
-      if (license !== 'None') files['LICENSE'] = licenseText(license, (await api.gitConfigGet('user.name')) ?? '')
-      if (readme) files['README.md'] = `# ${name}\n`
-      await api.initRepo(full, { defaultBranch: branch.trim() || 'main', files, initialCommit: Object.keys(files).length > 0 })
-      closeModal()
-      await A.openRepo(full)
-    } catch (e) { toast({ kind: 'error', title: 'Init failed', message: errMsg(e) }) }
-  }
-  return (
-    <ModalFrame title="Initialize a Repository" width={620} footer={<button className="btn btn-success btn-medium" disabled={!name} onClick={init}>Create Repository</button>}>
-      <div className="form-grid-row">
-        <span className="form-label">Name</span>
-        <input className="form-control" autoFocus value={name} onChange={(e) => setName(e.target.value.replace(/[\\/:*?"<>|]/g, ''))} onKeyDown={(e) => { if (e.key === 'Enter') void init() }} />
-        <span />
-      </div>
-      <div className="form-grid-row">
-        <span className="form-label">Initialize in</span>
-        <input className="form-control" value={dir} onChange={(e) => setDir(e.target.value)} />
-        <button className="btn btn-primary btn-small" onClick={async () => { const d = await api.pickDirectory('Initialize in', dir); if (d) setDir(d) }}>Browse</button>
-      </div>
-      <div className="form-grid-row">
-        <span className="form-label">Default branch name</span>
-        <input className="form-control narrow" value={branch} onChange={(e) => setBranch(e.target.value.replace(/\s/g, '-'))} />
-        <span />
-      </div>
-      <div className="form-grid-row">
-        <span className="form-label">.gitignore Template (optional)</span>
-        <select className="form-control" value={gitignore} onChange={(e) => setGitignore(e.target.value)}>
-          {Object.keys(GITIGNORE_TEMPLATES).map((k) => <option key={k}>{k}</option>)}
-        </select>
-        <span />
-      </div>
-      <div className="form-grid-row">
-        <span className="form-label">License (optional)</span>
-        <select className="form-control" value={license} onChange={(e) => setLicense(e.target.value)}>
-          {LICENSES.map((k) => <option key={k}>{k}</option>)}
-        </select>
-        <span />
-      </div>
-      <div className="form-grid-row">
-        <span className="form-label">README.md</span>
-        <input type="checkbox" checked={readme} onChange={(e) => setReadme(e.target.checked)} />
-        <span />
-      </div>
-      {full ? <div className="form-grid-row"><span className="form-label">Full path</span><span className="text-secondary full-path">{full}</span><span /></div> : null}
     </ModalFrame>
   )
 }
@@ -318,7 +143,7 @@ function ActivityModal() {
   }, [])
   const shown = (rows ?? []).filter((r) => !q.trim() || `${r.repo} ${r.args}`.toLowerCase().includes(q.trim().toLowerCase()))
   return (
-    <ModalFrame title="Activity Log" width={860}>
+    <ModalFrame title="Activity Logs" width={860}>
       <input className="form-control mb2" placeholder="Filter" value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="activity-list">
         {shown.map((r, i) => (

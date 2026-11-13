@@ -123,6 +123,24 @@ test('a plain line further left takes the commit over from a later lane', () => 
   assert.deepEqual(l.rows.map((r) => r.lane), [0, 1, 0, 0, 0])
 })
 
+test('the work-in-progress line is not a stash: the HEAD chain keeps its lane where lines meet', () => {
+  // the QA repo as the original draws it: WIP and two stashes on HEAD (main), a remote-only commit, side
+  // branches and a merge. The original's lanes per row (measured): main's chain stays in lane 0 down to the
+  // merge, the merged branch takes lane 1 and keeps it down to the root.
+  const rows: [string, string[], number][] = [
+    ['WIP', ['main'], 0], ['s1', ['main'], 1], ['s2', ['main'], 2], ['remote', ['refactor'], 3], ['main', ['integers'], 0],
+    ['typo', ['refactor'], 1], ['highlight', ['basic'], 2], ['basic', ['integers'], 2], ['integers', ['refactor'], 0],
+    ['coerce', ['usage'], 2], ['refactor', ['merge'], 0], ['merge', ['usage', 'logout'], 0], ['usage', ['lib'], 2],
+    ['logout', ['login'], 1], ['login', ['lib'], 1], ['lib', ['pixel'], 1], ['pixel', ['v3'], 1], ['v3', ['v2'], 1],
+    ['v2', ['v1'], 1], ['v1', ['init'], 1], ['init', [], 1]
+  ]
+  const commits = rows.map(([sha, parents]) => ({ sha, parents }))
+  const l = computeLayout(commits, { dashedRows: new Set([0, 1, 2]), wipRow: 0 })
+  assert.deepEqual(l.rows.map((r) => r.lane), rows.map((r) => r[2]))
+  // treated as a stash, the WIP line would hand main's chain to lane 1 at "refactor"
+  assert.equal(computeLayout(commits, { dashedRows: new Set([0, 1, 2]) }).rows[10].lane, 1)
+})
+
 test('a stash further left takes its commit only when it reached for it after the branch line did', () => {
   // stash above the branch line's claim (seen in a real history): the commit stays with its branch
   const before = computeLayout([

@@ -3,6 +3,9 @@
 // renderer on the 'command' channel. Shortcuts the renderer already handles are shown in the menu but
 // not registered here (registerAccelerator: false), so they keep working inside the app's own inputs.
 import { app, BrowserWindow, Menu, shell, type MenuItemConstructorOptions } from 'electron'
+import * as updater from './updater'
+import { updateMenuItems } from './menuText'
+import { openErrorLog, openPerfLog } from './logs'
 
 const REPO_URL = 'https://github.com/supermaty01/super-git'
 
@@ -15,8 +18,29 @@ export interface MenuState {
 }
 
 let state: MenuState = { hasRepo: false, leftPanel: true, detailPanel: true, terminal: false, favorites: [] }
+let lastWin: BrowserWindow | null = null
+let updateLabels = ''
+let updateTimer: NodeJS.Timeout | null = null
+
+/** File menu update entries, following the updater (and the "Last checked" time) */
+function updateItems(win: BrowserWindow | null): MenuItemConstructorOptions[] {
+  const items = updateMenuItems(updater.getStatus(), updater.getTimes())
+  updateLabels = JSON.stringify(items)
+  return items.map((it) => ({
+    label: it.label,
+    enabled: it.enabled,
+    click: it.action === 'install' ? () => void updater.installNow() : it.action === 'check' ? () => win?.webContents.send('command', 'app:check-updates') : undefined
+  }))
+}
+
+/** rebuild when the updater's state changes, and once a minute for the relative time */
+export function refreshUpdateMenu(): void {
+  if (JSON.stringify(updateMenuItems(updater.getStatus(), updater.getTimes())) !== updateLabels) buildAppMenu(lastWin)
+}
 
 export function buildAppMenu(win: BrowserWindow | null): void {
+  lastWin = win
+  if (!updateTimer) { updateTimer = setInterval(refreshUpdateMenu, 60_000); updateTimer.unref?.() }
   const send = (cmd: string) => () => win?.webContents.send('command', cmd)
   /** shown in the menu, handled by the renderer's keyboard handling */
   const shown = (accelerator: string) => ({ accelerator, registerAccelerator: false })
@@ -57,6 +81,7 @@ export function buildAppMenu(win: BrowserWindow | null): void {
         { type: 'separator' },
         { label: '&Preferences...', click: send('prefs'), ...shown('Control+,') },
         { type: 'separator' },
+        ...updateItems(win),
         { label: 'E&xit', role: 'quit', accelerator: 'Alt+F4' }
       ]
     },
@@ -111,10 +136,15 @@ export function buildAppMenu(win: BrowserWindow | null): void {
         { type: 'separator' },
         { label: `About ${name}`, click: send('about') },
         { label: `Version ${app.getVersion()} (${process.arch} ${process.arch.includes('64') ? '64' : '32'}-bit)`, enabled: false },
-        { label: 'Check for Updates...', click: send('app:check-updates') },
         { label: 'View Release Notes', click: () => void shell.openExternal(`${REPO_URL}/releases`) },
         { label: 'View Support Documentation', click: () => void shell.openExternal(`${REPO_URL}#readme`) },
-        { label: 'Support Logs', submenu: [{ label: 'View Activity Log', click: send('activity') }] },
+        {
+          label: 'Support Logs', submenu: [
+            { label: 'View Error Logs', click: openErrorLog },
+            { label: 'View Performance Logs', click: openPerfLog },
+            { label: 'View Activity Logs', click: send('activity') }
+          ]
+        },
         { type: 'separator' },
         { label: 'Browse or Submit Feature Requests', click: () => void shell.openExternal(`${REPO_URL}/issues`) },
         { label: 'Report a Problem', click: () => void shell.openExternal(`${REPO_URL}/issues/new`) }

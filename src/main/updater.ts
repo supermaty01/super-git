@@ -11,8 +11,11 @@ let status: UpdateState = { state: 'idle' }
 let win: BrowserWindow | null = null
 let manual = false
 let timer: NodeJS.Timeout | null = null
+/** for the File menu: "Check for Update (Last checked …)" / "Update Errored (…)" */
+const times = { lastChecked: null as number | null, errorTime: null as number | null }
+const listeners: Array<() => void> = []
 
-const send = () => win?.webContents.send('update', { ...status, manual })
+const send = () => { win?.webContents.send('update', { ...status, manual }); listeners.forEach((l) => l()) }
 
 /** why this copy cannot update itself, or null */
 function unsupported(): string | null {
@@ -22,7 +25,12 @@ function unsupported(): string | null {
   return null
 }
 
-function set(s: UpdateState) { status = s; send() }
+function set(s: UpdateState) {
+  if (s.state === 'none') { times.lastChecked = Date.now(); times.errorTime = null }
+  if (s.state === 'error') { times.errorTime = Date.now(); times.lastChecked = null }
+  status = s
+  send()
+}
 
 export function initUpdater(w: BrowserWindow): void {
   win = w
@@ -64,6 +72,9 @@ export async function check(isManual: boolean): Promise<UpdateState> {
 }
 
 export function getStatus(): UpdateState { return status }
+export function getTimes(): { lastChecked: number | null; errorTime: number | null } { return { ...times } }
+/** called whenever the state changes (the application menu follows it) */
+export function onChange(cb: () => void): void { listeners.push(cb) }
 
 /** restart into the downloaded version (silent install, then SuperGit starts again) */
 export async function installNow(): Promise<void> {

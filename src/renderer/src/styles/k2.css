@@ -1,0 +1,98 @@
+/* Branch cleanup, conflict prevention, gitflow forms, credential prompts (components/BranchCleanup.tsx, ConflictDetection.tsx, K2Modals.tsx, GitflowPanel.tsx) */
+
+/* ---- Clean Up Local Branches (the original's xl modal) ---- */
+.modal.k2-cleanup { width: 960px; }
+.k2-cleanup-body { display: flex; flex-direction: column; gap: 12px; }
+.k2-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding-left: 16px; }
+.k2-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--text-normal); }
+.k2-filter + .k2-filter { padding-left: 16px; }
+.k2-days { width: 56px; height: 26px; padding: 2px 6px; }
+.k2-select { width: auto; height: 26px; padding: 2px 6px; }
+.k2-count { padding-left: 16px; color: var(--text-secondary); font-size: 1.2rem; }
+.k2-table-wrap { border: 1px solid var(--section-border); min-height: 200px; max-height: 50vh; overflow: auto; }
+.k2-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 1.2rem; }
+.k2-th { position: sticky; top: 0; z-index: 1; background: var(--panel__bg2); color: var(--text-secondary); font-weight: 600; text-align: left; height: 30px; padding: 0 8px; border-bottom: 1px solid var(--section-border); white-space: nowrap; }
+.k2-th.sortable { cursor: pointer; }
+.k2-th.sortable:hover, .k2-th.sorted { color: var(--text-selected); }
+.k2-th-inner { display: inline-flex; align-items: center; gap: 6px; }
+.k2-th.center .k2-th-inner { justify-content: center; width: 100%; }
+.k2-sort-icon { width: 9px; height: 9px; opacity: 0; }
+.k2-th.sorted .k2-sort-icon { opacity: 1; }
+.k2-th.sortable:hover .k2-sort-icon { opacity: .6; }
+.k2-table td { height: 28px; padding: 0 8px; border-bottom: 1px solid var(--section-border); color: var(--text-normal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.k2-row:hover td { background: var(--hover-row); }
+.k2-row.pinned td { color: var(--blue); font-style: italic; }
+.k2-col-check { width: 40px; text-align: right; }
+.k2-col-check .sg-checkbox { justify-content: flex-end; }
+.k2-col-date { width: 114px; }
+.k2-col-merged { width: 81px; }
+.k2-col-remote { width: 170px; }
+.k2-table .center { text-align: center; }
+.k2-table .secondary { color: var(--text-secondary); }
+.k2-row.pinned .secondary { color: var(--blue); }
+.k2-remote { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.k2-remote-icon { flex: 0 0 15px; width: 15px; display: inline-flex; justify-content: center; }
+.k2-remote-icon .icon { width: 14px; height: 14px; }
+.k2-table .muted { color: var(--text-disabled); }
+.k2-empty { text-align: center; color: var(--text-secondary); height: 120px !important; }
+.k2-alert { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--orange); background: rgba(255, 152, 0, .08); color: var(--text-selected); border-radius: 3px; }
+.k2-alert-icon { color: var(--orange); width: 14px; height: 14px; }
+.k2-tricheck.on .sg-checkbox-box, .k2-tricheck .sg-checkbox-box:has(svg) { background: rgb(64,197,236); border-color: rgb(64,197,236); color: #151719; }
+
+/* the LOCAL header's cleanup button */
+.lp-cleanup-btn .icon { width: 11px; height: 11px; }
+
+/* ---- Conflict prevention (toolbar button + popover, min width 500, right aligned) ---- */
+.k2-cd { position: relative; display: flex; margin-right: 4px; }
+.k2-cd-placeholder { display: flex; min-width: 48px; margin-right: 4px; }
+.k2-cd-btn { min-width: 48px; justify-content: center; }
+.k2-cd-icon { position: relative; display: inline-flex; font-size: 1.6rem; }
+.k2-cd-icon > .icon:first-child { width: 16px; height: 16px; }
+.k2-cd-badge { position: absolute; right: -7px; bottom: -3px; width: 10px !important; height: 10px !important; }
+.k2-cd .warning, .k2-cd-title .warning { color: var(--orange); }
+.k2-cd .success, .k2-cd-title .success { color: var(--green); }
+.k2-cd-popover { position: absolute; top: 100%; right: 0; z-index: 60; min-width: 500px; max-width: 640px; padding: 12px 0 8px; background: var(--toolbar__bg2, var(--panel__bg2)); box-shadow: 0 6px 12px rgba(0,0,0,.3); color: var(--text-normal); font-size: 1.2rem; line-height: 1.5; }
+.k2-cd-title { display: flex; align-items: center; gap: 4px; padding: 0 16px; }
+.k2-cd-title h4 { margin: 0; font-size: 1.4rem; color: var(--text-selected); font-weight: 600; }
+.k2-cd-title .icon { width: 14px; height: 14px; }
+.k2-cd-desc { padding: 6px 16px 4px; display: flex; flex-direction: column; gap: 4px; }
+.k2-cd-desc.text { display: block; }
+.k2-cd-branch { cursor: pointer; }
+.k2-branch-pill { display: inline-block; padding: 0 5px; margin: 0 2px; border-radius: 3px; background: rgba(255,255,255,.1); color: var(--text-selected); font-family: var(--code-font); font-size: 1.15rem; }
+.k2-cd-branch:hover .k2-branch-pill { background: rgba(255,255,255,.18); }
+.k2-cd-files-toggle { padding: 4px 16px; cursor: pointer; color: var(--link-color); display: flex; align-items: center; gap: 4px; }
+.k2-cd-files-toggle .icon { width: 9px; height: 9px; }
+.k2-cd-files { padding: 0 16px 4px 30px; max-height: 160px; overflow: auto; font-family: var(--code-font); font-size: 1.1rem; }
+.k2-cd-file + .k2-cd-file { margin-top: 4px; }
+.k2-cd-lines { color: var(--text-secondary); padding-left: 12px; }
+.k2-cd-explainer { padding: 4px 16px; color: var(--text-secondary); }
+.k2-cd-hr { margin: 6px 0; border: 0; border-top: 1px solid var(--panel-border); }
+.k2-cd-header { padding: 6px 16px 2px; color: var(--text-secondary); font-size: 1.1rem; text-transform: uppercase; letter-spacing: .03em; }
+.k2-cd-options { display: flex; flex-direction: column; }
+.k2-cd-option { display: flex; align-items: center; gap: 8px; padding: 5px 16px; cursor: pointer; }
+.k2-cd-option:hover { background: var(--hover-row); color: var(--text-selected); }
+.k2-cd-option-icon { width: 12px; height: 12px; flex: 0 0 12px; color: var(--text-secondary); }
+.k2-cd-option-icon.rot90 { transform: rotate(90deg); }
+
+/* ---- preferences rows added by K2 ---- */
+.k2-rules { min-height: 200px; resize: vertical; font-family: var(--code-font); width: 100%; }
+.k2-rule-examples { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin-top: 12px; }
+.k2-rule-examples code { color: var(--blue); }
+.k2-rule-examples i code { font-style: normal; }
+
+/* ---- host key / SSL certificate modals ---- */
+.modal.k2-hostkey, .modal.k2-ssl { width: 620px; }
+.k2-modal-title { display: inline-flex; align-items: center; gap: 8px; }
+.k2-warn { color: var(--orange); width: 16px; height: 16px; }
+.k2-pre { white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; padding: 8px; background: var(--panel__bg0); font-family: var(--code-font); font-size: 1.1rem; color: var(--text-secondary); }
+
+/* ---- Gitflow slide-out forms ---- */
+.k2-gf .slidey-body { display: flex; flex-direction: column; gap: 10px; }
+.k2-gf-title { margin: 0 0 4px; font-size: 1.6rem; font-weight: 600; color: var(--text-selected); }
+.k2-gf-prefixed { display: flex; align-items: center; background: rgba(0,0,0,.2); border: 1px solid var(--section-border); border-radius: 3px; }
+.k2-gf-prefix { padding: 0 2px 0 10px; color: var(--text-secondary); font-size: 1.4rem; white-space: nowrap; }
+.k2-gf-prefixed .slidey-input { border: 0; background: transparent; flex: 1 1 auto; padding-left: 0; }
+.k2-gf-radios, .k2-gf-checks { display: flex; flex-direction: column; gap: 8px; }
+.k2-gf-radio { display: inline-flex; align-items: center; gap: 8px; }
+.k2-gf-radio.disabled { opacity: .5; }
+.k2-gf-buttons { display: flex; gap: 8px; }

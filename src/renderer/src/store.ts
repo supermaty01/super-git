@@ -41,7 +41,7 @@ export interface RepoView {
   /** author e-mails (lower case) the graph is filtered to; others are dimmed (like the original) */
   authorFilter?: string[]
   /** slide-out panel over the graph (Create Worktree) */
-  slidey?: { kind: 'worktree'; ref: string } | null
+  slidey?: { kind: 'worktree'; ref: string } | import('./components/GitflowPanel').GitflowForm | null
   /** per-commit +/- stats for the Changes column (loaded on demand) */
   stats?: Record<string, import('@shared/types').CommitStat>
 }
@@ -52,13 +52,15 @@ export interface Toast {
   title: string
   message?: string
   actions?: Array<{ label: string; run: () => void }>
+  /** playing the exit animation; removed afterwards */
+  leaving?: boolean
 }
 
 /** Inline prompt that temporarily replaces the toolbar (rename, set upstream, confirmations...). */
 export type PromptSpec =
-  | { kind: 'input'; message: string; value?: string; placeholder?: string; submitLabel?: string; large?: boolean; requireValue?: boolean; extraButtons?: Array<{ label: string; style?: 'default' | 'danger' | 'success'; run: () => unknown }>; onSubmit: (value: string) => unknown }
+  | { kind: 'input'; message: string; value?: string; placeholder?: string; submitLabel?: string; large?: boolean; requireValue?: boolean; /** a checkbox next to the buttons; its state is the second argument of onSubmit */ checkbox?: { label: string; value: boolean }; extraButtons?: Array<{ label: string; style?: 'default' | 'danger' | 'success'; run: () => unknown }>; onSubmit: (value: string, checked: boolean) => unknown }
   | { kind: 'upstream'; message: string; remotes: string[]; remote: string; branch: string; placeholder?: string; onSubmit: (remote: string, branch: string) => unknown }
-  | { kind: 'confirm'; message: string; buttons: Array<{ label: string; style?: 'default' | 'danger' | 'success' | 'warning'; run: () => unknown }>; /** shows "Don't ask again"; called with its state when a button is pressed */ dontAskAgain?: (checked: boolean) => void }
+  | { kind: 'confirm'; message: string; buttons: Array<{ label: string; style?: 'default' | 'danger' | 'success' | 'warning'; run: () => unknown }>; /** shows "Don't ask again"; called with its state when a button is pressed */ dontAskAgain?: (checked: boolean) => void; /** the Cancel button's text (the original's Yes / No prompts) */ cancelLabel?: string }
 
 export interface ModalSpec {
   kind: string
@@ -81,6 +83,8 @@ interface StoreState {
   unread: number
   /** the tab list dropdown (Ctrl+Shift+A) */
   tabsList: boolean
+  /** a commit hook rejected the commit: the red bar above the status bar ("View Log" shows `log`) */
+  hookFailure: { title: string; log: string } | null
 }
 
 export const useStore = create<StoreState>(() => ({
@@ -95,7 +99,8 @@ export const useStore = create<StoreState>(() => ({
   prompt: null,
   notifications: [],
   unread: 0,
-  tabsList: false
+  tabsList: false,
+  hookFailure: null
 }))
 
 export const getState = useStore.getState
@@ -131,11 +136,14 @@ export function activeRepoPath(): string | null {
 }
 
 let toastId = 1
-export function toast(t: Omit<Toast, 'id'>, ttl = t.kind === 'error' ? 10000 : 4000): number {
+/** the original's durations: errors 10 s, results 3 s (VERY_SHORT) or 5 s (SHORT); progress toasts stay until closed */
+export const TOAST_VERY_SHORT = 3000
+export const TOAST_SHORT = 5000
+export function toast(t: Omit<Toast, 'id'>, ttl = t.kind === 'error' ? 10000 : TOAST_VERY_SHORT): number {
   const id = toastId++
   setState((s) => ({
     toasts: [...s.toasts.slice(-4), { ...t, id }],
-    ...(t.kind === 'progress' ? {} : { notifications: [{ ...t, id, actions: undefined, time: Date.now() }, ...s.notifications].slice(0, 100), unread: s.unread + 1 })
+    ...(t.kind === 'progress' ? {} : { notifications: [{ ...t, id, actions: undefined, time: Date.now() }, ...s.notifications].slice(0, 100) })
   }))
   if (ttl > 0) setTimeout(() => dismissToast(id), ttl)
   // desktop notification when the window is in the background
@@ -144,8 +152,16 @@ export function toast(t: Omit<Toast, 'id'>, ttl = t.kind === 'error' ? 10000 : 4
   }
   return id
 }
+/** plays the 0.4 s exit animation, then removes the toast */
 export function dismissToast(id: number): void {
-  setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+  const t = getState().toasts.find((x) => x.id === id)
+  if (!t || t.leaving) return
+  setState((s) => ({ toasts: s.toasts.map((x) => (x.id === id ? { ...x, leaving: true } : x)) }))
+  setTimeout(() => setState((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })), 400)
+}
+/** removes a toast at once (progress toasts that are replaced by their result) */
+export function removeToast(id: number): void {
+  setState((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) }))
 }
 
 export function showPrompt(p: PromptSpec): void { setState({ prompt: p }) }

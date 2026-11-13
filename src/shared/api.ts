@@ -2,9 +2,12 @@ import type { AutoStash, UndoPreview, UpdateState,
   RepoSnapshot, WorkingStatus, FileChange, FileContext, FileContents, ConflictSides, BlameLine, Commit, ResetMode, PullMode,
   RebaseTodoItem, OpResult, Settings, MenuItemSpec, ProviderId, ProviderAccount, ProviderConnectOptions, HostedRepo, CommitOptions, StashMode, CommitStat, GitflowConfig, LfsInfo, SshKey, GpgKey, GitKrakenRepo
 } from './types'
+import type { K2Api } from './k2'
+
+import type { QuickApi } from './quickApi'
 
 /** Every method exposed from the main process. Each call resolves or rejects with an Error. */
-export interface Api {
+export interface Api extends QuickApi, K2Api {
   // dialogs & shell
   pickDirectory(title: string, defaultPath?: string): Promise<string | null>
   showContextMenu(items: MenuItemSpec[]): Promise<string | null>
@@ -57,7 +60,7 @@ export interface Api {
   // repo lifecycle
   resolveRepo(p: string): Promise<{ root: string; gitDir: string } | null>
   initRepo(dir: string, opts?: { defaultBranch?: string; files?: Record<string, string>; initialCommit?: boolean }): Promise<string>
-  cloneRepo(url: string, dest: string, opts: { shallow?: boolean; branch?: string; recurse?: boolean }): Promise<string>
+  cloneRepo(url: string, dest: string, opts: import('./clone').CloneOptions): Promise<string>
   watch(p: string): Promise<void>
   unwatch(p: string): Promise<void>
 
@@ -153,8 +156,18 @@ export interface Api {
   signature(p: string, sha: string): Promise<{ status: string; signer: string; key: string } | null>
   treeFiles(p: string, sha: string): Promise<string[]>
   listFiles(p: string): Promise<string[]>
+  repoIsEmpty(p: string): Promise<boolean>
+  /** Repository Management row: branch, ahead / behind, change counts; null = unreachable */
+  repoSummary(p: string): Promise<import('./repoSummary').RepoSummary | null>
+  /** repositories inside a projects folder */
+  scanRepos(folder: string): Promise<string[]>
+  makeInitialCommit(p: string): Promise<void>
   readFile(p: string, file: string): Promise<string>
   commitTemplate(p: string): Promise<string>
+  /** commit hooks present in the repository (pre-commit, prepare-commit-msg, commit-msg, post-commit) */
+  commitHooks(p: string): Promise<string[]>
+  /** one patch file with the changes of several working files */
+  createFilesPatch(p: string, files: string[], staged: boolean, outFile: string): Promise<void>
   gitConfigUnset(key: string, repo?: string): Promise<void>
   gitflowInit(p: string, cfg: Omit<GitflowConfig, 'initialized'>): Promise<void>
   gitflowStart(p: string, type: 'feature' | 'release' | 'hotfix', name: string): Promise<string>
@@ -173,13 +186,13 @@ export interface Api {
   deleteSubmodule(p: string, sub: string, commit?: boolean): Promise<void>
   submoduleAdd(p: string, url: string, subPath: string): Promise<void>
   submoduleSync(p: string): Promise<void>
-  openInEditor(p: string, file: string | null): Promise<void>
+  openInEditor(p: string, file: string | null, editor?: string): Promise<void>
   externalMergeTool(p: string, file: string): Promise<OpResult>
   externalDiffTool(p: string, file: string, staged: boolean, from?: string, to?: string): Promise<void>
   sshKeys(): Promise<SshKey[]>
   sshGenerate(email: string, name: string): Promise<SshKey>
   gpgKeys(): Promise<GpgKey[]>
-  setTheme(theme: 'dark' | 'light'): Promise<void>
+  setTheme(theme: string): Promise<void>
 
   // terminal
   termStart(p: string, cols: number, rows: number): Promise<number>
@@ -192,6 +205,14 @@ export interface Api {
   undo(p: string, opts?: { stash?: boolean }): Promise<string | null>
   redo(p: string, opts?: { stash?: boolean }): Promise<string | null>
   undoState(p: string): Promise<{ undo: UndoPreview; redo: UndoPreview }>
+
+  // supergit:// links (main/deeplink.ts)
+  /** root commits and remotes of the repository at p (identifies it for a repolink), or null */
+  repoIdentity(p: string): Promise<{ root: string; firstCommits: string[]; shallow: boolean; remotes: import('./types').Remote[] } | null>
+  /** full sha of an existing commit, or null */
+  commitExists(p: string, sha: string): Promise<string | null>
+  /** fetch a remote for a link (and the linked tag) */
+  fetchForLink(p: string, remote: string, tag?: string): Promise<void>
 }
 
 export interface Events {

@@ -10,7 +10,11 @@ import { fullDate, parseStash } from '../lib/format'
 import { Icon } from './Icon'
 import { FileList, FileListToolbar, summarizeFiles, StatusIcon } from './FileList'
 import { WipPanel } from './WipPanel'
+import { Checkbox } from './Checkbox'
+import { ParentLink } from './ParentLink'
+import { useSortDesc } from '../fileListState'
 import * as A2 from '../actions2'
+import * as QM from '../quickMenus'
 import type { Commit, FileChange, FileContext, Stash } from '@shared/types'
 
 export function useFileListMode(): [mode: 'path' | 'tree', set: (m: 'path' | 'tree') => void] {
@@ -51,14 +55,16 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
   const path = repo.path
   const [files, setFiles] = useState<FileChange[] | null>(null)
   const [mode, setMode] = useFileListMode()
-  const [sortDesc, setSortDesc] = useState(false)
+  const [sortDesc, setSortDesc] = useSortDesc()
   const [viewAll, setViewAll] = useState(false)
+  const [fsel, setFsel] = useState<string[]>([])
   const [allFiles, setAllFiles] = useState<string[] | null>(null)
   const [sig, setSig] = useState<{ status: string; signer: string; key: string } | null>(null)
   const parent = commit.parents[0]
   useEffect(() => {
     let alive = true
     setFiles(null)
+    setFsel([])
     api.commitFiles(path, commit.sha, parent).then((f) => alive && setFiles(f)).catch(() => alive && setFiles([]))
     api.signature(path, commit.sha).then((x) => alive && setSig(x)).catch(() => undefined)
     return () => { alive = false }
@@ -75,14 +81,15 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
   const active = repo.center.kind === 'file' && repo.center.ctx.kind === 'commit' && repo.center.ctx.sha === commit.sha ? repo.center.ctx.path : null
   const ctxFor = (f: FileChange): FileContext => ({ kind: 'commit', sha: commit.sha, parent, path: f.path, oldPath: f.oldPath, status: f.status })
   const coAuthors = useMemo(() => parseCoAuthors(commit.body), [commit.body])
-  const committerDiffers = commit.committer && (commit.committer !== commit.author || Math.abs(commit.commitDate - commit.date) > 60000)
+  // like the original: a "committed" row only for another committer, not for a later commit date (amend, rebase)
+  const committerDiffers = !!commit.committer && (commit.committer !== commit.author || (commit.committerEmail ?? '').toLowerCase() !== (commit.email ?? '').toLowerCase())
 
   return (
     <div className="commit-detail">
       <WipBanner repo={repo} />
       <div className="commit-detail-header">
         <span className="commit-sha-label">commit:</span>
-        <span className="commit-sha" title="Copy commit sha" onClick={(e) => { const el = e.currentTarget; void api.copy(commit.sha).then(() => flashTip(el, 'Copied!')) }}>{commit.sha.slice(0, 6)}</span>
+        <span className="commit-sha" title="Copy" onClick={(e) => { const el = e.currentTarget; void api.copy(commit.sha).then(() => flashTip(el, 'Copied!', 'bottom')) }}>{commit.sha.slice(0, 6)}</span>
       </div>
       <div className="commit-detail-scroll">
         <MessageBox>
@@ -100,7 +107,7 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
           </div>
           <div className="commit-parents">
             {commit.parents.length ? <>parent: {commit.parents.map((p, i) => (
-              <span key={p}>{i ? ',' : ''}<span className="commit-parent-link" onClick={() => { A.selectCommit(path, p); updateRepo(path, { focus: { sha: p, t: Date.now() } }) }}>{p.slice(0, 6)}</span></span>
+              <span key={p}>{i ? ',' : ''}<ParentLink repo={repo} sha={p} /></span>
             ))}</> : null}
           </div>
         </div>
@@ -126,7 +133,7 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
         </div>
         {/* like the original, "View all files" shows the whole tree with every folder closed */}
         <FileListToolbar mode={viewAll ? 'tree' : mode} setMode={(m) => { if (m === 'path') setViewAll(false); setMode(m) }} sortDesc={sortDesc} setSortDesc={setSortDesc}
-          extra={<label className="view-all"><input type="checkbox" checked={viewAll} onChange={(e) => setViewAll(e.target.checked)} /> View all files</label>} />
+          extra={<Checkbox className="view-all" checked={viewAll} onChange={setViewAll}>View all files</Checkbox>} />
         {shown ? (
           <FileList
             key={viewAll ? 'all' : 'changed'}
@@ -135,8 +142,11 @@ function CommitPanel({ repo, commit }: { repo: RepoView; commit: Commit }) {
             mode={viewAll ? 'tree' : mode}
             sortDesc={sortDesc}
             activePath={active}
+            selected={fsel}
+            onSelect={setFsel}
             onOpen={(f) => A.openFile(path, ctxFor(f))}
-            onContext={(f) => fileMenu(path, f, 'commit', ctxFor(f))}
+            onContext={(f) => fsel.length > 1 && fsel.includes(f.path) ? QM.commitMultiMenu(path, commit.sha, (files ?? []).filter((x) => fsel.includes(x.path))) : fileMenu(path, f, 'commit', ctxFor(f))}
+            onDirContext={(dir, fl) => QM.dirMenu(path, dir, fl, 'commit')}
           />
         ) : null}
       </div>
@@ -150,7 +160,7 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
   const [untracked, setUntracked] = useState<Set<string>>(new Set())
   const [info, setInfo] = useState<Commit | null>(null)
   const [mode, setMode] = useFileListMode()
-  const [sortDesc, setSortDesc] = useState(false)
+  const [sortDesc, setSortDesc] = useSortDesc()
   useEffect(() => {
     let alive = true
     api.stashFiles(path, stash.sha).then((f) => alive && setFiles(f)).catch(() => alive && setFiles([]))
@@ -158,7 +168,18 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
     if (stash.parents[2]) api.commitFiles(path, stash.parents[2]).then((f) => alive && setUntracked(new Set(f.map((x) => x.path)))).catch(() => undefined)
     return () => { alive = false }
   }, [path, stash.sha, stash.parents])
-  const ctxFor = (f: FileChange): FileContext => untracked.has(f.path)
+  const [viewAll, setViewAll] = useState(false)
+  const [allFiles, setAllFiles] = useState<string[] | null>(null)
+  useEffect(() => {
+    if (!viewAll || allFiles) return
+    void api.treeFiles(path, stash.sha).then(setAllFiles)
+  }, [viewAll, allFiles, path, stash.sha])
+  const shown = useMemo(() => {
+    if (!viewAll || !files || !allFiles) return files
+    const changed = new Set(files.map((f) => f.path))
+    return [...files, ...allFiles.filter((p) => !changed.has(p)).map((p) => ({ path: p, status: 'N' as const }))]
+  }, [viewAll, files, allFiles])
+  const ctxFor = (f: FileChange): FileContext => f.status === 'N' ? { kind: 'commit', sha: stash.sha, parent: stash.parents[0], path: f.path, status: 'N' } : untracked.has(f.path)
     ? { kind: 'stash', sha: stash.parents[2], parent: undefined, path: f.path, status: 'A' }
     : { kind: 'stash', sha: stash.sha, parent: stash.parents[0], path: f.path, oldPath: f.oldPath, status: f.status }
   const active = repo.center.kind === 'file' && repo.center.ctx.kind === 'stash' ? repo.center.ctx.path : null
@@ -168,7 +189,7 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
     <div className="commit-detail" onContextMenu={(e) => { if ((e.target as HTMLElement).closest('.file-row')) return; e.preventDefault(); void stashMenu(path, stash) }}>
       <div className="commit-detail-header">
         <span className="commit-sha-label">commit:</span>
-        <span className="commit-sha" title="Copy commit sha" onClick={(e) => { const el = e.currentTarget; void api.copy(stash.sha).then(() => flashTip(el, 'Copied!')) }}>{stash.sha.slice(0, 6)}</span>
+        <span className="commit-sha" title="Copy" onClick={(e) => { const el = e.currentTarget; void api.copy(stash.sha).then(() => flashTip(el, 'Copied!', 'bottom')) }}>{stash.sha.slice(0, 6)}</span>
       </div>
       <div className="commit-detail-scroll">
         <MessageBox>
@@ -181,12 +202,14 @@ function StashPanel({ repo, stash }: { repo: RepoView; stash: Stash }) {
             <div className="commit-author-date">authored <span>{fullDate(info?.date ?? stash.date)}</span></div>
           </div>
           <div className="commit-parents">
-            {base ? <>parent: <span className="commit-parent-link" onClick={() => { A.selectCommit(path, base); updateRepo(path, { focus: { sha: base, t: Date.now() } }) }}>{base.slice(0, 6)}</span></> : null}
+            {base ? <>parent: <ParentLink repo={repo} sha={base} /></> : null}
           </div>
         </div>
         <FileSummary files={files} />
-        <FileListToolbar mode={mode} setMode={setMode} sortDesc={sortDesc} setSortDesc={setSortDesc} />
-        {files ? <FileList files={files} mode={mode} sortDesc={sortDesc} activePath={active} onOpen={(f) => A.openFile(path, ctxFor(f))} /> : null}
+        {/* "View all files" like on a commit: the stash's whole tree, every folder closed */}
+        <FileListToolbar mode={viewAll ? 'tree' : mode} setMode={(m) => { if (m === 'path') setViewAll(false); setMode(m) }} sortDesc={sortDesc} setSortDesc={setSortDesc}
+          extra={<Checkbox className="view-all" checked={viewAll} onChange={setViewAll}>View all files</Checkbox>} />
+        {shown ? <FileList key={viewAll ? 'all' : 'changed'} collapsed={viewAll} files={shown} mode={viewAll ? 'tree' : mode} sortDesc={sortDesc} activePath={active} onOpen={(f) => A.openFile(path, ctxFor(f))} /> : null}
       </div>
     </div>
   )
@@ -211,33 +234,42 @@ function MultiPanel({ repo, shas }: { repo: RepoView; shas: string[] }) {
   // like the original: a contiguous range shows its combined diff, anything else only lists the commits
   const contiguous = commits.length > 1 && commits.every((c, i) => i === commits.length - 1 || c.parents[0] === commits[i + 1].sha)
   const base = commits[commits.length - 1]?.parents[0]
-  if (contiguous && base) return <TwoCommitsPanel repo={repo} cards={commits} a={base} b={commits[0].sha} caption={`Viewing diff of ${commits.length} commits`} title={`${shas.length} commits selected`} />
+  if (contiguous && base) return <TwoCommitsPanel repo={repo} cards={commits} a={base} b={commits[0].sha} caption={`Viewing diff of ${commits.length} commits`} title={`${commits.length} commits selected`} />
   return (
     <div className="commit-detail">
       <WipBanner repo={repo} />
-      <div className="commit-detail-header">{shas.length} commits selected</div>
+      <div className="commit-detail-header">{commits.length} commits selected</div>
       <div className="commit-detail-scroll">
-        {commits.map((c) => <CompareCard key={c.sha} path={repo.path} c={c} />)}
+        <CommitCards path={repo.path} commits={commits} />
         <div className="compare-caption multi-no-diff">A combined diff is not shown for this selection. Select a contiguous range of commits, or one or two items, to see their changes.</div>
       </div>
     </div>
   )
 }
 
+/** the original's `mini-commit-info` card: avatar, message, "date @ time by author", 6-character sha */
 function CompareCard({ path, c }: { path: string; c: Commit }) {
   return (
     <div className="compare-card" onClick={() => { A.selectCommit(path, c.sha); updateRepo(path, { focus: { sha: c.sha, t: Date.now() } }) }}>
-      <div className="compare-card-summary truncate">{c.summary}</div>
-      <div className="compare-card-meta"><span>{fullDate(c.date)} by {c.author}</span><span className="compare-card-sha">{c.sha.slice(0, 7)}</span></div>
+      <div className="compare-card-avatar" style={{ backgroundImage: `url(${avatarUrl(c.email, c.author)})` }} />
+      <div className="compare-card-middle">
+        <div className="compare-card-summary truncate">{c.summary}</div>
+        <div className="compare-card-meta truncate">{fullDate(c.date)} by {c.author}</div>
+      </div>
+      <span className="compare-card-sha">{c.sha.slice(0, 6)}</span>
     </div>
   )
+}
+
+function CommitCards({ path, commits }: { path: string; commits: Commit[] }) {
+  return <div className="multi-commits">{commits.map((c) => <CompareCard key={c.sha} path={path} c={c} />)}</div>
 }
 
 function TwoCommitsPanel({ repo, cards, a, b, caption, title = '2 commits selected' }: { repo: RepoView; cards: Commit[]; a: string; b: string; caption: string; title?: string }) {
   const path = repo.path
   const [files, setFiles] = useState<FileChange[] | null>(null)
   const [mode, setMode] = useFileListMode()
-  const [sortDesc, setSortDesc] = useState(false)
+  const [sortDesc, setSortDesc] = useSortDesc()
   useEffect(() => {
     let alive = true
     setFiles(null)
@@ -251,8 +283,8 @@ function TwoCommitsPanel({ repo, cards, a, b, caption, title = '2 commits select
       <WipBanner repo={repo} />
       <div className="commit-detail-header">{title}</div>
       <div className="commit-detail-scroll">
-        <div className="compare-caption">{caption}</div>
-        {cards.map((c) => <CompareCard key={c.sha} path={path} c={c} />)}
+        <div className="multi-commit-title">{caption}</div>
+        <CommitCards path={path} commits={cards} />
         <FileSummary files={files} />
         <FileListToolbar mode={mode} setMode={setMode} sortDesc={sortDesc} setSortDesc={setSortDesc} />
         {files ? <FileList files={files} mode={mode} sortDesc={sortDesc} activePath={active} onOpen={(f) => A.openFile(path, ctxFor(f))} /> : null}
@@ -266,7 +298,7 @@ function ComparePanel({ repo, a, b }: { repo: RepoView; a: string; b: string | n
   const s = repo.snapshot!
   const [files, setFiles] = useState<FileChange[] | null>(null)
   const [mode, setMode] = useFileListMode()
-  const [sortDesc, setSortDesc] = useState(false)
+  const [sortDesc, setSortDesc] = useSortDesc()
   useEffect(() => {
     let alive = true
     setFiles(null)

@@ -61,7 +61,7 @@ export function FileHistoryView({ repo, file, sha, blame }: { repo: RepoView; fi
                     <div className="fh-message truncate">{h.summary}</div>
                     <div className="fh-signature truncate">{fullDate(h.date).split(' @ ')[0]} by {h.author}</div>
                   </div>
-                  <span className="fh-sha" title="Show this commit in the graph" onClick={(e) => { e.stopPropagation(); A.selectCommit(path, h.sha); A.closeCenter(path) }}>{h.sha.slice(0, 6)}</span>
+                  <span className="fh-sha" title={repo.snapshot?.commits.some((c) => c.sha === h.sha) ? `View ${h.sha.slice(0, 6)} on graph` : 'This commit is not visible on the graph'} onClick={(e) => { e.stopPropagation(); if (!repo.snapshot?.commits.some((c) => c.sha === h.sha)) return; A.selectCommit(path, h.sha); A.closeCenter(path) }}>{h.sha.slice(0, 6)}</span>
                 </div>
                 {status ? <div className={`fh-status ${status.cls}`}><span className="fh-status-label">{status.label}</span><span className="truncate">{status.text}</span></div> : null}
               </div>

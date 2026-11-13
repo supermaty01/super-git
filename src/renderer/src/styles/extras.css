@@ -103,3 +103,5 @@ kbd { font-family: var(--code-font); font-size: 1.15rem; background: var(--panel
 /* keep header columns aligned with rows (scrollbar + gear) */
 .graph-header { padding-right: 28px; }
 .graph-row { padding-right: 20px; }
+.lp-row.selected { background: var(--hover-row); color: var(--text-selected); }
+.mt-auto-resolved { padding: 6px 12px; background: rgba(92, 184, 92, .2); color: var(--text-selected); font-size: 1.2rem; }

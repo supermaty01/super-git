@@ -8,7 +8,7 @@ A lightweight, local-only desktop Git client for Windows, centred on a fast, rea
 2. Download the latest **`SuperGit-Setup-<version>.exe`** from [Releases](https://github.com/supermaty01/super-git/releases/latest) and run it. It installs for your user only (no administrator rights needed), lets you pick the folder or install for all users, and adds a Start menu shortcut. Its options page also offers a desktop shortcut, "Open with SuperGit" in the Explorer folder menu, and importing the repositories (and matching preferences) you have open in GitKraken.
 3. Prefer not to install? Download **`SuperGit-<version>-portable.exe`** from the same page and run it from anywhere. The portable version does not update itself.
 
-From 1.3.0 on, the installed app updates itself: it checks GitHub in the background, downloads new versions quietly and asks you to **Restart to update**. **Help > Check for Updates** checks right away; Preferences > General can turn the automatic check off.
+From 1.3.0 on, the installed app updates itself: it checks GitHub in the background, downloads new versions quietly and asks you to **Restart to update**. **File > Check for Update** checks right away (it shows when it last checked, and becomes **Restart and Install Update** once a new version is downloaded); Preferences > General can turn the automatic check off.
 
 The installers are not code-signed yet, so Windows SmartScreen may show "Windows protected your PC": choose **More info → Run anyway**. Installing a newer version over an older one keeps your settings and open tabs.
 
@@ -28,6 +28,31 @@ The installers are not code-signed yet, so Windows SmartScreen may show "Windows
 | **Interface** | Native context menus with submenus; inline toolbar prompts for rename / set upstream / confirmations; tooltips; left panel with per-row show / hide and ⋮ menus, collapsible and maximizable sections, Gitflow tree |
 | **Workspace** | Repo tabs (rename, reopen closed), repository management, init with .gitignore / license templates, clone options (branch, shallow, submodules), integrated terminal (PowerShell, pwsh, cmd or Git Bash), command palette, light and dark themes, profiles (separate author identities), SSH key generation, GPG / SSH commit signing, per-repo preferences (identity, .gitignore editor, hooks path, commit template) |
 | **Preferences** | General (auto-fetch / auto-prune, default branch name, remember tabs, keep submodules updated, line endings, long paths, git executable), UI (toolbar labels, date / time format, notification location, spell check, graph options such as commit descriptions, ghost labels, row highlighting, author initials), Commit (push after commit, skip hooks, strip comments, global template), Commit signing (GPG or SSH, sign tags), SSH, Editor (font, size, tab size, wrap, line numbers, syntax highlighting, line endings), In-app terminal (shell, font, line height, cursor, dim when unfocused), External tools |
+
+## Command line and links
+
+The installer's **Add supergit to PATH** option (on by default, no administrator rights needed) puts the `supergit` command on your user PATH. It works in cmd, PowerShell and Git Bash; open a new terminal after installing.
+
+```bash
+supergit .                    # open the repository you are in (any folder or file inside it opens the repo root)
+supergit ..\other-repo        # relative paths are resolved against the terminal's folder
+supergit -p C:\code\project   # same as a plain path
+supergit -u "supergit://repo/C:/code/project"
+supergit --help               # usage; --version prints the version. Neither opens a window
+```
+
+The terminal gets its prompt back immediately; if SuperGit is already running, the repository opens in a tab of that window. A path that is not in a repository shows "Could not find repo at …".
+
+**Links.** The installer also registers `supergit://` links:
+
+- `supergit://repo/<path>` opens that repository.
+- `supergit://repolink/<first commit sha>/<commit|branch|tag>/<name>?url=<remote URL>` opens the repository the link was made from (matched by its first commit, or by the remote URL, among your open, favourite and recent repositories) and selects the commit, branch or tag. If the repository is not found you can browse for it or clone it; if the remote is missing SuperGit offers to add it, and if the ref is missing it offers to fetch.
+
+Right-click a commit, branch or tag and choose **Copy link to this commit / branch / tag** to share one. Links are offered only for remotes others can reach (https or ssh), never for local folders.
+
+The portable version does not include the `supergit` command or register links (it is extracted to a temporary folder on every start). Pass a full path to the portable `.exe` instead, e.g. `SuperGit-<version>-portable.exe C:\code\project`.
+
+**Logs.** Help > Support Logs > View Error Logs / View Performance Logs open `%APPDATA%\SuperGit\logs\error.log` (main-process and window errors) and `performance.log` (startup timings); View Activity Logs lists the git commands SuperGit ran.
 
 ## Run
 

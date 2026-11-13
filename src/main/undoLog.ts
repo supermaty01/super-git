@@ -34,6 +34,8 @@ export function findNext(list: ReflogEntry[], cfg: Config): Next {
   for (const e of list) {
     const m = e.message
     if (!m || NON_UNDOABLE_REBASE.test(m)) continue
+    // `stash push` / `stash pop` log a reset that does not move HEAD: nothing to undo, and it must not hide the real last action
+    if (m === 'reset: moving to HEAD' && e.oldId === e.newId) continue
     if (cfg.prefixes.some((p) => p.test(m))) { stack.push(e); continue }
     if (!cfg.supported.some((p) => p.test(m))) return { entry: e, originalMessage: cfg.original(m), valid: false }
     const msg = cfg.message(m)

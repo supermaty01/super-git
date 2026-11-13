@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  runGit, parseLog, LOG_FORMAT, parseRefs, REF_FORMAT, parseStatus, parseDiff, buildPatch, parseNameStatus, parseWorktrees, synthesizeAddDiff, parseLfsPatterns, isReadOnlyGit
+  runGit, parseLog, LOG_FORMAT, parseRefs, REF_FORMAT, parseStatus, parseDiff, buildPatch, parseNameStatus, parseWorktrees, synthesizeAddDiff, parseLfsPatterns, isReadOnlyGit, parseTrackedFiles
 } from '../src/main/gitcore.ts'
 
 function sh(cwd: string, ...args: string[]) {
@@ -145,4 +145,20 @@ test('read-only mode only lets through git commands that cannot change a reposit
   ]
   for (const a of read) assert.equal(isReadOnlyGit(a), true, `should be allowed: git ${a.join(' ')}`)
   for (const a of write) assert.equal(isReadOnlyGit(a), false, `should be blocked: git ${a.join(' ')}`)
+})
+
+test('tracked files for the file finder skip submodules and list conflicted files once', () => {
+  const sha = 'a'.repeat(40)
+  const raw = [
+    `100644 ${sha} 0\t.gitignore`,
+    `100644 ${sha} 0\t.gitmodules`,
+    `100644 ${sha} 0\tREADME.md`,
+    `100644 ${sha} 1\tsrc/math.js`,
+    `100644 ${sha} 2\tsrc/math.js`,
+    `100644 ${sha} 3\tsrc/math.js`,
+    `160000 ${sha} 0\tvendor/lib`,
+    `100755 ${sha} 0\tsrc/with space.sh`
+  ].join('\0') + '\0'
+  assert.deepEqual(parseTrackedFiles(raw), ['.gitignore', '.gitmodules', 'README.md', 'src/math.js', 'src/with space.sh'])
+  assert.deepEqual(parseTrackedFiles(''), [])
 })

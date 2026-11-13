@@ -28,6 +28,13 @@ import type {
   Commit, Ref, Stash, Worktree, Remote, FileChange, FileStatus, WorkingStatus, DiffHunk, FileDiff, DiffLine, BlameLine
 } from '../shared/types'
 
+/** git's own text is UTF-8, but Windows messages it relays (schannel, …) come in the ANSI code page */
+const utf8Strict = new TextDecoder('utf-8', { fatal: true })
+const ansi = new TextDecoder('windows-1252')
+export function decodeStderr(b: Buffer): string {
+  try { return utf8Strict.decode(b) } catch { return ansi.decode(b) }
+}
+
 export class GitError extends Error {
   stderr: string
   code: number
@@ -120,6 +127,9 @@ export function assertWritable(what: string): void {
 /** Activity log: the last git commands SuperGit ran (Help > Support Logs > View Activity Log). */
 export interface ActivityEntry { time: number; repo: string; args: string; ms: number; code: number; error?: string }
 const activity: ActivityEntry[] = []
+let extendedLogging = false
+/** Preferences → General → "Use extended logging in activity log": also records read-only commands */
+export function setExtendedLogging(on: boolean): void { extendedLogging = on }
 export const activityLog = (): ActivityEntry[] => activity.slice().reverse()
 
 export function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
@@ -175,15 +185,15 @@ export function runGit(args: string[], opts: RunOptions): Promise<RunResult> {
       // that can change something, and reads only when they really failed (exit 1 from config / check-ignore /
       // diff --quiet and a failed rev-parse --verify are answers, not errors)
       const read = isReadOnlyGit(args)
-      if (!read || ((code ?? 0) > 1 && args[0] !== 'rev-parse')) {
-        activity.push({ time: started, repo: nodePath.basename(opts.cwd), args: args.join(' ').slice(0, 400), ms: Date.now() - started, code: code ?? 0, error: code ? Buffer.concat(err).toString('utf8').trim().split(/\r?\n/).slice(-3).join(' ').slice(0, 300) : undefined })
+      if (!read || extendedLogging || ((code ?? 0) > 1 && args[0] !== 'rev-parse')) {
+        activity.push({ time: started, repo: nodePath.basename(opts.cwd), args: args.join(' ').slice(0, 400), ms: Date.now() - started, code: code ?? 0, error: code ? decodeStderr(Buffer.concat(err)).trim().split(/\r?\n/).slice(-3).join(' ').slice(0, 300) : undefined })
         if (activity.length > 500) activity.splice(0, activity.length - 500)
       }
       const stdoutBuf = Buffer.concat(out)
       const res: RunResult = {
         stdout: opts.binary ? '' : stdoutBuf.toString('utf8'),
         stdoutBuf,
-        stderr: Buffer.concat(err).toString('utf8'),
+        stderr: decodeStderr(Buffer.concat(err)),
         code: code ?? 0
       }
       if (res.code !== 0 && !opts.allowFail) {
@@ -515,4 +525,23 @@ export function parseLfsPatterns(gitattributes: string): string[] {
 export function repoSettingsFile(storedPath: string): string {
   const name = storedPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
   return `${name}-${createHash('md5').update(storedPath).digest('hex')}`
+}
+
+/**
+ * Tracked files from `git ls-files -s -z` (the file finder's list, like the original's): submodules (gitlinks,
+ * mode 160000) are left out, a conflicted file is listed once, and the order is the index's: dotfiles first, then by name.
+ */
+export function parseTrackedFiles(lsFilesStage: string): string[] {
+  const seen = new Set<string>()
+  const res: string[] = []
+  for (const rec of lsFilesStage.split('\0')) {
+    const tab = rec.indexOf('\t')
+    if (tab < 0) continue
+    const [mode] = rec.slice(0, tab).split(' ')
+    const file = rec.slice(tab + 1)
+    if (mode === '160000' || seen.has(file)) continue
+    seen.add(file)
+    res.push(file)
+  }
+  return res
 }

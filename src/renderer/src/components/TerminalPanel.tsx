@@ -5,15 +5,18 @@ import '@xterm/xterm/css/xterm.css'
 import { api, bridge } from '../lib/api'
 import { useStore } from '../store'
 import * as A2 from '../actions2'
+import * as A from '../actions'
 import { Icon } from './Icon'
+import { resolveTheme } from '../lib/theme'
 
 function termTheme(light: boolean) {
   return light
-    ? { background: '#fcfcfc', foreground: '#333333', cursor: '#4d88ff', selectionBackground: '#4d88ff40' }
-    : { background: '#060707', foreground: '#D8DEE9', cursor: '#4D88FF', selectionBackground: '#4D88FF40', black: '#060707', red: '#EF6B73', green: '#3DD68C', yellow: '#F0C75E', blue: '#5E9EFF', magenta: '#D176D6', cyan: '#50C4D8', white: '#D8DEE9', brightBlack: '#616E88', brightRed: '#F5939C', brightGreen: '#6EDFA6', brightYellow: '#F5D88B', brightBlue: '#89B8FF', brightMagenta: '#E2A0E8', brightCyan: '#7CD5E3', brightWhite: '#ECEFF4' }
+    ? { background: '#000000', foreground: '#D8DEE9', cursor: '#4d88ff', selectionBackground: '#4d88ff40' }
+    : { background: '#000000', foreground: '#D8DEE9', cursor: '#4D88FF', selectionBackground: '#4D88FF40', black: '#000000', red: '#EF6B73', green: '#3DD68C', yellow: '#F0C75E', blue: '#5E9EFF', magenta: '#D176D6', cyan: '#50C4D8', white: '#D8DEE9', brightBlack: '#616E88', brightRed: '#F5939C', brightGreen: '#6EDFA6', brightYellow: '#F5D88B', brightBlue: '#89B8FF', brightMagenta: '#E2A0E8', brightCyan: '#7CD5E3', brightWhite: '#ECEFF4' }
 }
 
-const SHELL_LABEL: Record<string, string> = { powershell: 'PowerShell', pwsh: 'pwsh', cmd: 'cmd', gitbash: 'Git Bash' }
+const SHELL_LABEL: Record<string, string> = { powershell: 'powershell.exe', pwsh: 'pwsh.exe', cmd: 'cmd.exe', gitbash: 'bash.exe' }
+const SHELL_CHOICES: Array<[string, string]> = [['powershell', 'Windows PowerShell'], ['pwsh', 'PowerShell 7 (pwsh)'], ['cmd', 'Command Prompt'], ['gitbash', 'Git Bash']]
 
 interface TermTab { key: number; title: string; /** bumped by Restart: a new shell in the same tab */ gen: number }
 let nextKey = 1
@@ -27,32 +30,45 @@ export function TerminalPanel({ path }: { path: string }) {
   const [tabs, setTabs] = useState<TermTab[]>(() => [{ key: nextKey++, title: SHELL_LABEL[shell] ?? shell, gen: 0 }])
   const [active, setActive] = useState(tabs[0].key)
 
-  const add = () => { const t = { key: nextKey++, title: SHELL_LABEL[shell] ?? shell, gen: 0 }; setTabs((l) => [...l, t]); setActive(t.key) }
-  const close = (key: number) => {
-    setTabs((l) => {
-      const rest = l.filter((t) => t.key !== key)
-      if (!rest.length) { A2.toggleTerminal(path, false); return l }
-      if (key === active) setActive(rest[Math.max(0, l.findIndex((t) => t.key === key) - 1)].key)
-      return rest
-    })
+  // every tab runs the selected shell (changing it restarts them), so the tab names follow it
+  const label = SHELL_LABEL[shell] ?? shell
+  // the latest tabs / active tab, so menu commands and quick repeats never act on stale state
+  const tabsRef = useRef(tabs)
+  const activeRef = useRef(active)
+  tabsRef.current = tabs
+  activeRef.current = active
+  const update = (next: TermTab[], nextActive: number) => {
+    tabsRef.current = next
+    activeRef.current = nextActive
+    setTabs(next)
+    setActive(nextActive)
   }
+
+  const add = () => { const t = { key: nextKey++, title: label, gen: 0 }; update([...tabsRef.current, t], t.key) }
+  const close = (key: number) => {
+    const l = tabsRef.current
+    const rest = l.filter((t) => t.key !== key)
+    if (rest.length === l.length) return
+    if (!rest.length) { A2.toggleTerminal(path, false); return }
+    const cur = activeRef.current
+    update(rest, key === cur ? rest[Math.max(0, l.findIndex((t) => t.key === key) - 1)].key : cur)
+  }
+  const select = (key: number) => update(tabsRef.current, key)
   // commands from the menu / shortcuts
   useEffect(() => {
     const on = (e: Event) => {
       const cmd = (e as CustomEvent<string>).detail
-      setTabs((l) => {
-        const i = l.findIndex((t) => t.key === active)
-        if (cmd === 'new') add()
-        else if (cmd === 'close') close(active)
-        else if (cmd === 'next' && l.length) setActive(l[(i + 1) % l.length].key)
-        else if (cmd === 'prev' && l.length) setActive(l[(i - 1 + l.length) % l.length].key)
-        else if (/^\d$/.test(cmd) && l[Number(cmd) - 1]) setActive(l[Number(cmd) - 1].key)
-        return l
-      })
+      const l = tabsRef.current
+      const i = l.findIndex((t) => t.key === activeRef.current)
+      if (cmd === 'new') add()
+      else if (cmd === 'close') close(activeRef.current)
+      else if (cmd === 'next' && l.length) select(l[(i + 1) % l.length].key)
+      else if (cmd === 'prev' && l.length) select(l[(i - 1 + l.length) % l.length].key)
+      else if (/^\d$/.test(cmd) && l[Number(cmd) - 1]) select(l[Number(cmd) - 1].key)
     }
     window.addEventListener('sg-terminal', on)
     return () => window.removeEventListener('sg-terminal', on)
-  }, [active]) // eslint-disable-line react-hooks/exhaustive-deps
+  }) // eslint-disable-line react-hooks/exhaustive-deps
 
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -78,16 +94,16 @@ export function TerminalPanel({ path }: { path: string }) {
       <div className="terminal-header">
         <div className="terminal-tabs">
           {tabs.map((t, i) => (
-            <span key={t.key} className={`terminal-tab${t.key === active ? ' active' : ''}`} title={`${t.title} · ${path} (Ctrl+Shift+${i + 1})`} onClick={() => setActive(t.key)}>
-              <Icon name="terminal" /> {t.title}
+            <span key={t.key} className={`terminal-tab${t.key === active ? ' active' : ''}`} title={`${label} · ${path} (Ctrl+Shift+${i + 1})`} onClick={() => select(t.key)}>
+              <Icon name="terminal" /> {label}
               <span className="terminal-tab-close" title="Close terminal tab (Ctrl+Shift+W)" onClick={(e) => { e.stopPropagation(); close(t.key) }}><Icon name="times-thin" /></span>
             </span>
           ))}
           <span className="terminal-btn" title="New terminal tab (Ctrl+Shift+N)" onClick={add}><Icon name="plus" /></span>
         </div>
         <span className="grow" />
-        <span className="terminal-btn" title="Restart this terminal" onClick={() => setTabs((l) => l.map((t) => (t.key === active ? { ...t, gen: t.gen + 1 } : t)))}><Icon name="refresh" /></span>
-        <span className="terminal-btn" title="Open external terminal" onClick={() => api.openTerminal(path)}><Icon name="external" /></span>
+        <span className="terminal-btn" title="Select the terminal shell" onClick={() => void A.popup(SHELL_CHOICES.map(([id, label]) => ({ label, checked: id === shell, act: () => A2.saveSettings({ terminalShell: id as typeof shell }) })))}><Icon name="chevron-down" /></span>
+        <span className="terminal-btn" title="Kill terminal" onClick={() => close(active)}><Icon name="trash" /></span>
         <span className="terminal-btn" title="Close terminal (Ctrl+`)" onClick={() => A2.toggleTerminal(path, false)}><Icon name="times" /></span>
       </div>
       {tabs.map((t) => <TermSession key={`${t.key}:${t.gen}`} path={path} visible={t.key === active} />)}
@@ -105,7 +121,7 @@ function TermSession({ path, visible }: { path: string; visible: boolean }) {
 
   useEffect(() => {
     const st = useStore.getState().settings!
-    const light = st.theme === 'light'
+    const light = resolveTheme(st.theme).scheme === 'light'
     const term = new Terminal({
       fontFamily: `${st.terminalFont}, Consolas, "Cascadia Mono", monospace`,
       fontSize: st.terminalFontSize,
@@ -140,6 +156,9 @@ function TermSession({ path, visible }: { path: string; visible: boolean }) {
       if (ev.ctrlKey && ev.key === 'c' && term.hasSelection()) { void api.copy(term.getSelection()); return false }
       if (ev.ctrlKey && ev.key === 'v') { void navigator.clipboard.readText().then((t) => { if (id >= 0) void api.termWrite(id, t) }); return false }
       if (ev.ctrlKey && ev.key === '`') return false
+      // the app's own shortcuts still work from the terminal: the command palette, tab switching, terminal tabs
+      if (ev.ctrlKey && !ev.altKey && (ev.key.toLowerCase() === 'p' || ev.key === 'Tab' || ev.key === 'PageUp' || ev.key === 'PageDown')) return false
+      if (ev.ctrlKey && ev.shiftKey && !ev.altKey && /^(KeyN|KeyW|Digit[1-9])$/.test(ev.code)) return false
       return true
     })
     const ro = new ResizeObserver(() => {
@@ -164,7 +183,7 @@ function TermSession({ path, visible }: { path: string; visible: boolean }) {
     termRef.current?.focus()
   }, [visible])
 
-  useEffect(() => { if (termRef.current) termRef.current.options.theme = termTheme(theme === 'light') }, [theme])
+  useEffect(() => { if (termRef.current) termRef.current.options.theme = termTheme(resolveTheme(theme).scheme === 'light') }, [theme])
 
   // font / cursor preferences apply to the running terminal
   const font = useStore((s) => s.settings!.terminalFont)

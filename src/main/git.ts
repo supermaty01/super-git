@@ -10,6 +10,7 @@ import type {
   RepoSnapshot, RepoState, FileChange, FileContext, FileContents, ConflictSides, ResetMode, PullMode, RebaseTodoItem, AutoStash,
   OpResult, Commit, BlameLine, HeadInfo, CommitOptions, Submodule, GitflowConfig
 } from '../shared/types'
+import { cloneArgs, type CloneOptions } from '../shared/clone'
 
 /** Supplies auth config (e.g. Azure DevOps PAT header) for network operations. */
 let authConfigProvider: () => Array<[string, string]> = () => []
@@ -33,11 +34,21 @@ export async function tryOut(cwd: string, args: string[]): Promise<string | null
   const r = await g(cwd, args, { allowFail: true })
   return r.code === 0 ? r.stdout : null
 }
+const SERVER_PROGRESS = /^remote: (Enumerating|Counting|Compressing|Total|Resolving)/
 export function net(cwd: string, op: string, args: string[], extra: Partial<RunOptions> = {}) {
-  return runGit(args, {
+  const serverLines: string[] = []
+  const p = runGit(args, {
     cwd, config: authConfigProvider(), ...extra,
-    onProgress: (l) => progressSink(cwd, op, l)
+    onProgress: (l) => { if (l.startsWith('remote: ') && !SERVER_PROGRESS.test(l)) serverLines.push(l); progressSink(cwd, op, l) }
   })
+  // the server's `remote:` lines (merge request links, policy notices...) are shown as a toast after push / fetch / pull
+  const flush = () => {
+    if (!serverLines.length || !['push', 'fetch', 'pull'].includes(op) || extra.env?.GCM_INTERACTIVE === 'never') return
+    const remote = args.slice(1).find((a) => !a.startsWith('-')) ?? 'origin'
+    progressSink(cwd, 'remote-message', JSON.stringify({ remote, text: serverLines.join(String.fromCharCode(10)) }))
+  }
+  p.then(flush, flush)
+  return p
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -62,14 +73,11 @@ export async function initRepo(dir: string, opts: { defaultBranch?: string; file
   }
 }
 
-export async function cloneRepo(url: string, dest: string, opts: { shallow?: boolean; branch?: string; recurse?: boolean } = {}): Promise<void> {
+export async function cloneRepo(url: string, dest: string, opts: CloneOptions = {}): Promise<void> {
   const parent = path.dirname(dest)
   await fs.mkdir(parent, { recursive: true })
-  const args = ['clone', '--progress']
-  if (opts.shallow) args.push('--depth', '1')
-  if (opts.branch) args.push('--branch', opts.branch)
-  args.push(url, dest)
-  await net(parent, 'clone', args)
+  await net(parent, 'clone', cloneArgs(url, dest, opts))
+  if (opts.sparse?.length) await g(dest, ['sparse-checkout', 'set', ...opts.sparse])
   // submodules are fetched after the clone itself, so one that cannot be fetched (unreachable URL, a local
   // path blocked by git's protocol.file.allow safety rule…) never loses the clone; the caller hears about it
   if (opts.recurse) {
@@ -490,11 +498,35 @@ export async function applyHunk(cwd: string, ctx: FileContext, hunkIndex: number
 export async function commit(cwd: string, message: string, amend: boolean, opts: CommitOptions = {}): Promise<void> {
   const tmp = path.join(os.tmpdir(), `supergit-msg-${process.pid}-${Date.now()}.txt`)
   await fs.writeFile(tmp, message, 'utf8')
+  // trace2 events tell which hook failed and with what exit code (git commit itself always exits 1)
+  const trace = `${tmp}.trace`
   try {
-    await g(cwd, ['commit', '-F', tmp, opts.keepComments ? '--cleanup=whitespace' : '--cleanup=strip', ...(amend ? ['--amend'] : []), ...(opts.noVerify ? ['--no-verify'] : []), ...(opts.sign ? ['-S'] : [])], { env: await identityProvider(cwd) })
+    await g(cwd, ['commit', '-F', tmp, opts.keepComments ? '--cleanup=whitespace' : '--cleanup=strip', ...(amend ? ['--amend'] : []), ...(opts.noVerify ? ['--no-verify'] : []), ...(opts.sign ? ['-S'] : [])], { env: { ...(await identityProvider(cwd)), GIT_TRACE2_EVENT: trace } })
+  } catch (e) {
+    const failed = await failedHooks(trace)
+    if (failed.length && e instanceof GitError) throw new Error(HOOK_FAILED + JSON.stringify({ hooks: failed, log: (e.stderr || e.message).trim() }))
+    throw e
   } finally {
     await fs.rm(tmp, { force: true })
+    await fs.rm(trace, { force: true })
   }
+}
+
+/** marker of the error thrown when a commit hook rejected the commit; followed by JSON { hooks: [{ name, code }], log } */
+export const HOOK_FAILED = 'SUPERGIT_HOOK_FAILED:'
+async function failedHooks(traceFile: string): Promise<Array<{ name: string; code: number }>> {
+  let text = ''
+  try { text = await fs.readFile(traceFile, 'utf8') } catch { return [] }
+  const names = new Map<number, string>()
+  const failed: Array<{ name: string; code: number }> = []
+  for (const line of text.split('\n')) {
+    try {
+      const ev = JSON.parse(line) as { event?: string; child_id?: number; child_class?: string; hook_name?: string; code?: number }
+      if (ev.event === 'child_start' && ev.child_class === 'hook' && ev.child_id !== undefined && ev.hook_name) names.set(ev.child_id, ev.hook_name)
+      else if (ev.event === 'child_exit' && ev.child_id !== undefined && names.has(ev.child_id) && ev.code) failed.push({ name: names.get(ev.child_id)!, code: ev.code })
+    } catch { /* not a json line */ }
+  }
+  return failed
 }
 
 export async function getLastCommitMessage(cwd: string): Promise<string> {
@@ -506,20 +538,44 @@ export async function getLastCommitMessage(cwd: string): Promise<string> {
 
 export async function checkout(cwd: string, target: string): Promise<void> { await g(cwd, ['checkout', target]) }
 
-/** checkout; when local changes are in the way they are stashed ("Auto stash before checking out …") and popped after */
-export async function checkoutAutoStash(cwd: string, target: string, label?: string): Promise<AutoStash | undefined> {
+/**
+ * checkout like the original:
+ * - a branch is checked out with a plain `git checkout`: local changes that don't conflict are carried over,
+ *   and changes that conflict refuse the checkout ("1 conflict prevents checkout. …"), nothing is stashed;
+ * - checking out a commit or a tag (detached HEAD) first stashes all local changes, untracked files included,
+ *   as "Auto stash before checking out "HEAD"" and leaves them in the stash ('kept').
+ */
+export async function checkoutAutoStash(cwd: string, target: string): Promise<AutoStash | undefined> {
+  const isBranch = (await tryOut(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${target}`])) !== null
+  if (isBranch) {
+    try {
+      await checkout(cwd, target)
+    } catch (e) {
+      throw checkoutError(e)
+    }
+    return undefined
+  }
+  const dirty = (await g(cwd, ['status', '--porcelain', '--ignore-submodules=all'])).stdout.trim() !== ''
+  if (dirty) await g(cwd, ['stash', 'push', '--include-untracked', '-m', 'Auto stash before checking out "HEAD"'])
   try {
     await checkout(cwd, target)
-    return undefined
   } catch (e) {
-    const msg = (e as Error).message
-    if (!LOCAL_CHANGES.test(msg)) throw e
-    // the original names the branch, and says "HEAD" when the checkout detaches (commit or tag)
-    label ??= (await tryOut(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${target}`])) !== null ? target : 'HEAD'
-    await g(cwd, ['stash', 'push', ...(UNTRACKED_IN_WAY.test(msg) ? ['--include-untracked'] : []), '-m', `Auto stash before checking out "${label}"`])
-    try { await checkout(cwd, target) } catch (e2) { await popAutoStash(cwd); throw e2 }
-    return (await popAutoStash(cwd)) ? 'popped' : 'kept'
+    // put the changes back where they were: HEAD has not moved, so the stash applies cleanly
+    if (dirty) await popAutoStash(cwd)
+    throw checkoutError(e)
   }
+  return dirty ? 'kept' : undefined
+}
+
+/** git's "local changes would be overwritten by checkout" error in the original's words: "<n> conflict(s) prevent(s) checkout." */
+export function checkoutError(e: unknown): Error {
+  const stderr = String((e as { stderr?: string }).stderr ?? (e as Error).message ?? '')
+  if (!stderr.includes('Your local changes to the following files would be overwritten by checkout')) return e as Error
+  const n = (stderr.match(/^\t.*$/gm) ?? []).length
+  if (!n) return e as Error
+  return new Error(n === 1
+    ? '1 conflict prevents checkout.\nCommit, stash, or discard your changes first.'
+    : `${n} conflicts prevent checkout.\nCommit, stash, or discard your changes first.`)
 }
 export async function restoreFile(cwd: string, sha: string, file: string): Promise<void> { await g(cwd, ['checkout', sha, '--', file]) }
 
@@ -724,11 +780,17 @@ export async function interactiveRebase(cwd: string, base: string | null, items:
 
 export async function stashSave(cwd: string, message: string | undefined, mode: 'all' | 'staged' | 'keep-index' = 'all'): Promise<void> {
   const flags = mode === 'staged' ? ['--staged'] : mode === 'keep-index' ? ['--include-untracked', '--keep-index'] : ['--include-untracked']
-  await g(cwd, ['stash', 'push', ...flags, ...(message ? ['-m', message] : [])])
+  await g(cwd, ['stash', 'push', ...flags, '-m', await stashMessageOrDefault(cwd, message)])
 }
 /** stash only the given paths (untracked ones included) */
 export async function stashPaths(cwd: string, paths: string[], message?: string): Promise<void> {
-  await g(cwd, ['stash', 'push', '--include-untracked', ...(message ? ['-m', message] : []), '--', ...paths])
+  await g(cwd, ['stash', 'push', '--include-untracked', '-m', await stashMessageOrDefault(cwd, message), '--', ...paths])
+}
+/** the original's stash message when none is given: "WIP on <branch>" ("WIP on (no branch)" on a detached HEAD) */
+async function stashMessageOrDefault(cwd: string, message: string | undefined): Promise<string> {
+  if (message?.trim()) return message.trim()
+  const branch = (await tryOut(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']))?.trim()
+  return `WIP on ${branch || '(no branch)'}`
 }
 /** write the diff of a single file (working tree or index) to a patch file */
 export async function createFilePatch(cwd: string, file: string, staged: boolean, outFile: string): Promise<void> {

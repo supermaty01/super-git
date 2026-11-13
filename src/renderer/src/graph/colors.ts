@@ -1,6 +1,6 @@
 export const GRAPH_COLORS = ['#15a0bf', '#0669f7', '#8e00c2', '#c517b6', '#d90171', '#cd0101', '#f25d2e', '#f2ca33', '#7bd938', '#2ece9d']
 let APP_BG = [9, 10, 11]
-export function setGraphTheme(theme: 'dark' | 'light'): void { APP_BG = theme === 'light' ? [252, 252, 252] : [9, 10, 11] }
+export function setGraphTheme(bg: number[]): void { APP_BG = bg }
 
 function rgb(hex: string): number[] {
   const n = parseInt(hex.slice(1), 16)

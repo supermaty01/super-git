@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 
-interface Tip { text: string; x: number; y: number; place: 'top' | 'bottom' | 'right'; shift: number }
+interface Tip { text: string; x: number; y: number; place: 'top' | 'bottom' | 'right'; shift: number; /** inside the left panel: instant, bootstrap look */ lp?: boolean; toolbar?: boolean }
 
-let flashTo: ((el: HTMLElement, text: string) => void) | null = null
-/** a short confirmation bubble to the right of an element, like the original's "Copied!" */
-export function flashTip(el: HTMLElement, text: string): void { flashTo?.(el, text) }
+let flashTo: ((el: HTMLElement, text: string, place: 'right' | 'bottom') => void) | null = null
+/** a short confirmation bubble next to an element (right, or centred below like the commit sha's "Copied!") */
+export function flashTip(el: HTMLElement, text: string, place: 'right' | 'bottom' = 'right'): void { flashTo?.(el, text, place) }
 
 /**
  * Global tooltip layer. Any element with a `title` gets the original's dark bootstrap-style tooltip
@@ -25,6 +25,8 @@ export function TooltipLayer() {
     const onOver = (e: MouseEvent) => {
       let el = e.target as HTMLElement | null
       while (el && el !== document.body) {
+        // elements the original gives a native OS tooltip (graph cells) keep their title
+        if (el.hasAttribute?.('data-native-title')) { if (current.current) clear(); return }
         if (el instanceof Element && el.hasAttribute('title') && !(el instanceof SVGTitleElement)) {
           const t = el.getAttribute('title') ?? ''
           el.removeAttribute('title')
@@ -40,21 +42,25 @@ export function TooltipLayer() {
       clear()
       current.current = el
       const target = el
+      const lp = !!target.closest('.left-panel')
+      // toolbar buttons show their tooltip at once, 8px below the button (like the original)
+      const inToolbar = !!target.closest('.toolbar')
       timer.current = window.setTimeout(() => {
         if (!target.isConnected) return
         const text = target.getAttribute('data-gk-title')
         if (!text) return
         const r = target.getBoundingClientRect()
+        if (lp && target.closest('.lp-header') && target.matches('button')) { setTip({ text, x: r.right + 7, y: r.top + r.height / 2, place: 'right', shift: 0, lp }); return }
         const below = r.bottom + 40 < window.innerHeight
-        setTip({ text, x: r.left + r.width / 2, y: below ? r.bottom + 5 : r.top - 5, place: below ? 'bottom' : 'top', shift: 0 })
-      }, 450)
+        setTip({ text, x: r.left + r.width / 2, y: below ? r.bottom + (inToolbar ? 8 : 5) : r.top - 5, place: below ? 'bottom' : 'top', shift: 0, lp, toolbar: inToolbar })
+      }, lp || inToolbar ? 0 : 450)
     }
     let flashTimer: number | null = null
-    flashTo = (el, text) => {
+    flashTo = (el, text, place) => {
       clear()
       if (flashTimer) window.clearTimeout(flashTimer)
       const r = el.getBoundingClientRect()
-      setTip({ text, x: r.right + 6, y: r.top + r.height / 2, place: 'right', shift: 0 })
+      setTip(place === 'bottom' ? { text, x: r.left + r.width / 2, y: r.bottom + 5, place: 'bottom', shift: 0 } : { text, x: r.right + 6, y: r.top + r.height / 2, place: 'right', shift: 0 })
       flashTimer = window.setTimeout(() => { flashTimer = null; setTip(null) }, 1500)
     }
     const onDown = () => clear()
@@ -101,7 +107,7 @@ export function TooltipLayer() {
 
   if (!tip) return null
   return (
-    <div ref={tipRef} className={`gk-tooltip ${tip.place}`}
+    <div ref={tipRef} className={`gk-tooltip ${tip.place}${tip.lp ? ' lp-tip' : ''}${tip.toolbar ? ' toolbar-tip' : ''}`}
       style={{ left: pos?.left ?? -9999, top: pos?.top ?? -9999, ['--arrow-shift' as string]: `${pos?.shift ?? 0}px`, visibility: pos ? 'visible' : 'hidden' }}>
       {tip.text}
     </div>

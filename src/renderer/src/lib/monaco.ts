@@ -7,33 +7,35 @@ import { colorBrackets } from './decorate'
 
 ;(self as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = { getWorker: () => new EditorWorker() }
 
-monaco.editor.defineTheme('supergit-dark', {
+const DARK_THEME: monaco.editor.IStandaloneThemeData = {
   base: 'vs-dark',
   inherit: true,
   rules: [],
   colors: {
     'editor.background': '#090A0B',
     'editor.foreground': '#FFFFFF',
-    'editorLineNumber.foreground': '#6b6c6d',
-    'editorLineNumber.activeForeground': '#c7c8c8',
+    'editorLineNumber.foreground': '#858585',
+    'editorLineNumber.activeForeground': '#c6c6c6',
     'editorGutter.background': '#090A0B',
-    'editor.lineHighlightBackground': '#ffffff08',
+    'editor.lineHighlightBackground': '#00000000',
+    'editor.lineHighlightBorder': '#282828',
     'editor.selectionBackground': '#4d88ff55',
-    'diffEditor.insertedLineBackground': '#5cb85c33',
-    'diffEditor.removedLineBackground': '#d9413d33',
-    'diffEditor.insertedTextBackground': '#5cb85c40',
-    'diffEditor.removedTextBackground': '#d9413d45',
+    'diffEditor.insertedLineBackground': '#5cb85c26',
+    'diffEditor.removedLineBackground': '#d9413d26',
+    'diffEditor.insertedTextBackground': '#5cb85c33',
+    'diffEditor.removedTextBackground': '#d9413d33',
     'diffEditor.diagonalFill': '#ffffff14',
-    'diffEditorGutter.insertedLineBackground': '#5cb85c33',
-    'diffEditorGutter.removedLineBackground': '#d9413d33',
+    'diffEditorGutter.insertedLineBackground': '#00000000',
+    'diffEditorGutter.removedLineBackground': '#00000000',
     'editorOverviewRuler.border': '#00000000',
     'scrollbarSlider.background': '#ffffff26',
     'scrollbarSlider.hoverBackground': '#ffffff40',
     'editorIndentGuide.background1': '#ffffff14',
     'editorWhitespace.foreground': '#ffffff30'
   }
-})
-monaco.editor.defineTheme('supergit-light', {
+}
+monaco.editor.defineTheme('supergit-dark', DARK_THEME)
+const LIGHT_THEME: monaco.editor.IStandaloneThemeData = {
   base: 'vs',
   inherit: true,
   rules: [],
@@ -46,9 +48,16 @@ monaco.editor.defineTheme('supergit-light', {
     'diffEditor.removedTextBackground': '#9f1a1640',
     'editorOverviewRuler.border': '#00000000'
   }
-})
+}
+monaco.editor.defineTheme('supergit-light', LIGHT_THEME)
 monaco.editor.setTheme('supergit-dark')
-export function setMonacoTheme(theme: 'dark' | 'light'): void { monaco.editor.setTheme(theme === 'light' ? 'supergit-light' : 'supergit-dark') }
+/** scheme picks the base theme; bg (the skin's app background) tints the editor surface */
+export function setMonacoTheme(scheme: 'dark' | 'light', bg?: string): void {
+  const base = scheme === 'light' ? LIGHT_THEME : DARK_THEME
+  if (!bg) { monaco.editor.setTheme(scheme === 'light' ? 'supergit-light' : 'supergit-dark'); return }
+  monaco.editor.defineTheme('supergit-skin', { ...base, colors: { ...base.colors, 'editor.background': bg, 'editorGutter.background': bg } })
+  monaco.editor.setTheme('supergit-skin')
+}
 
 const extMap = new Map<string, string>()
 const nameMap = new Map<string, string>()
@@ -67,7 +76,8 @@ export const editorPrefs = { fontSize: 12, tabSize: 4, lineNumbers: true, syntax
 export function editorOptions(forceLineNumbers = false): monaco.editor.IEditorOptions {
   return {
     fontSize: editorPrefs.fontSize,
-    lineHeight: Math.round(editorPrefs.fontSize * 1.5),
+    lineHeight: Math.round(editorPrefs.fontSize * 4 / 3),
+    fontLigatures: true,
     lineNumbers: editorPrefs.lineNumbers || forceLineNumbers ? 'on' : 'off',
     // like the original: brackets coloured by nesting depth
     bracketPairColorization: { enabled: true }

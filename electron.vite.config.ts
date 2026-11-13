@@ -5,7 +5,9 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
-    resolve: { alias: { '@shared': resolve('src/shared') } }
+    resolve: { alias: { '@shared': resolve('src/shared') } },
+    // cli.js is the `supergit` command (bin/supergit.cmd runs it as plain Node)
+    build: { rollupOptions: { input: { index: resolve('src/main/index.ts'), cli: resolve('src/main/cli.ts') } } }
   },
   preload: {
     plugins: [externalizeDepsPlugin()],

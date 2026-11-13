@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RepoView } from '../store'
-import { useStore, setState, getState } from '../store'
+import { useStore, setState, getState, toast } from '../store'
 import * as A from '../actions'
 import { api } from '../lib/api'
 import { Icon } from './Icon'
 import { Dropdown } from './Dropdown'
 import * as A2 from '../actions2'
 import type { PullMode } from '@shared/types'
+import { ConflictDetectionButton } from './ConflictDetection'
+
+const lfsWarned = new Set<string>()
+function warnLfsMissing(path: string): void {
+  if (lfsWarned.has(path)) return
+  lfsWarned.add(path)
+  getState().settings && toast({ kind: 'error', title: 'Git LFS is not installed', message: 'This repository requires LFS but you do not have LFS installed. Modifying files that are tracked by LFS could potentially harm your repository.' }, 10000)
+}
 
 const PULL_LABELS: Record<PullMode, string> = {
   fetch: 'Fetch All',
@@ -25,7 +33,7 @@ function TB({ title, icon, onClick, disabled, badge, busy, active, tip }: { titl
     <button className={`toolbar-btn${disabled ? ' disabled' : ''}${active ? ' active' : ''}`} disabled={disabled} onClick={onClick} title={tip}>
       <span className="toolbar-title">{title}</span>
       <span className="toolbar-icon">
-        <Icon name={busy ? 'spinner' : icon} spin={busy} />
+        <Icon name={busy ? 'circle-notch' : icon} spin={busy} />
         {badge ? <span className="toolbar-badge">{badge}</span> : null}
       </span>
     </button>
@@ -41,7 +49,9 @@ export function Toolbar({ repo }: { repo: RepoView }) {
   const [repoOpen, setRepoOpen] = useState(false)
   const [lfsOpen, setLfsOpen] = useState(false)
   const [lfs, setLfs] = useState(false)
-  useEffect(() => { let on = true; void api.lfsInfo(path).then((i) => { if (on) setLfs(i.installed && i.patterns.length > 0) }).catch(() => {}); return () => { on = false } }, [path])
+  // looked at again when .gitattributes changes (in the working tree or by a checkout)
+  const attrsKey = s ? [s.head.sha, ...[...s.status.staged, ...s.status.unstaged].filter((f) => /(^|\/)\.gitattributes$/.test(f.path)).map((f) => f.path + f.status)].join('|') : ''
+  useEffect(() => { let on = true; void api.lfsInfo(path).then((i) => { if (on) setLfs(i.installed && i.patterns.length > 0); if (on && !i.installed && i.patterns.length > 0) warnLfsMissing(path) }).catch(() => {}); return () => { on = false } }, [path, attrsKey])
   const [branchOpen, setBranchOpen] = useState(false)
   const repoBtn = useRef<HTMLButtonElement>(null)
   const branchBtn = useRef<HTMLButtonElement>(null)
@@ -71,12 +81,12 @@ export function Toolbar({ repo }: { repo: RepoView }) {
         <div className="bread-crumb">
           <button ref={repoBtn} className="crumb" onClick={() => setRepoOpen((v) => !v)}>
             <span className="crumb-help">repository</span>
-            <span className="crumb-text repo">{s?.name ?? '…'} <Icon name={repoOpen ? 'caret-up' : 'caret-down'} className="crumb-caret" /></span>
+            <span className="crumb-text repo"><span className="crumb-name">{s?.name ?? '…'}</span><Icon name={repoOpen ? 'caret-up' : 'caret-down'} className="crumb-caret" /></span>
           </button>
           <Icon name="chevron-right" className="crumb-sep" />
           <button ref={branchBtn} className="crumb" onClick={() => setBranchOpen((v) => !v)}>
             <span className="crumb-help">branch</span>
-            <span className="crumb-text">{branchLabel} <Icon name={branchOpen ? 'caret-up' : 'caret-down'} className="crumb-caret" /></span>
+            <span className="crumb-text"><span className="crumb-name">{branchLabel}</span><Icon name={branchOpen ? 'caret-up' : 'caret-down'} className="crumb-caret" /></span>
           </button>
         </div>
         {repoOpen ? (
@@ -127,7 +137,7 @@ export function Toolbar({ repo }: { repo: RepoView }) {
         <TB title="Stash" tip="Stash" icon="stash" busy={busy === 'Stashing'} disabled={locked || !dirty} onClick={() => A.stashSave(path)} />
         <TB title="Pop" tip="Pop Stash" icon="pop" busy={busy === 'Popping stash'} disabled={locked || !s?.stashes.length} onClick={() => A.stashPop(path, 0)} />
         <span className="toolbar-gap" />
-        <TB title="Terminal" tip="Show/Hide Terminal" icon="terminal" active={repo.terminal} onClick={() => A2.toggleTerminal(path)} />
+        <TB title="Terminal" tip="Show/Hide Terminal" icon="terminal" active={repo.terminal} disabled={!!busy} onClick={() => A2.toggleTerminal(path)} />
         {lfs ? (
           <div className="toolbar-lfs" style={{ position: 'relative', display: 'flex' }}>
             <button className={`toolbar-btn lfs-btn${lfsOpen ? ' active' : ''}`} onClick={() => setLfsOpen((v) => !v)}>LFS <Icon name="caret-down" /></button>
@@ -138,6 +148,7 @@ export function Toolbar({ repo }: { repo: RepoView }) {
                   {LFS_ITEMS.map(([label, cmd]) => (
                     <li key={cmd} onClick={() => { setLfsOpen(false); void A.run(path, () => api.lfsCommand(path, cmd), { busy: 'LFS', success: label.replace(/ all LFS files| local LFS repository/, ' complete') , errorTitle: `${label} failed` }) }}>{label}</li>
                   ))}
+                  <li onClick={() => { setLfsOpen(false); A.openFile(path, { kind: 'unstaged', path: '.gitattributes', status: 'N' }) }}>View .gitattributes in editor</li>
                 </ul>
               </>
             ) : null}
@@ -146,6 +157,7 @@ export function Toolbar({ repo }: { repo: RepoView }) {
       </div>
 
       <div className="toolbar-right">
+        <ConflictDetectionButton repo={repo} />
         <TB title="Actions" tip="Command Palette (Ctrl + P)" icon="actions" onClick={() => setState({ palette: true })} />
         <TB title="Search" tip="Search Commits (Ctrl + F)" icon="search" onClick={() => {
           const v = getState().repos[path]

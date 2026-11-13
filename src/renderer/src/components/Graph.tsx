@@ -1,32 +1,44 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { tagAnnotation } from '../lib/tagNote'
 import { createPortal } from 'react-dom'
 import type { RepoView } from '../store'
-import { useStore, setState, updateRepo } from '../store'
+import { useStore, setState, updateRepo, openModal } from '../store'
 import { searchEntry, queryParts, matchesQuery } from '../lib/commitSearch'
 import { AuthorFilter } from './AuthorFilter'
 import { api } from '../lib/api'
 import * as A from '../actions'
 import * as A2 from '../actions2'
-import { commitMenu, wipMenu, stashMenu, refGroupMenu, graphHeaderMenu } from '../menus'
+import { commitMenu, stashMenu, refGroupMenu, graphHeaderMenu } from '../menus'
 import { computeLayout, type Edge, type LayoutRow } from '../graph/layout'
+import { ghostSources } from '../graph/ghost'
 import { laneColor, laneAlpha, laneMix } from '../graph/colors'
 import { visibleCommits, refIsShown, highlightCommits, smartRefs } from '../graph/visibility'
 import { avatarUrl } from '../lib/avatar'
 import { relTime, fullDate, parseStash, stashKey } from '../lib/format'
 import { Icon } from './Icon'
+import { faThumbtack } from '@fortawesome/free-solid-svg-icons'
 import { Resizer } from './Resizer'
 import { refDragProps } from './LeftPanel'
+import { isInvalidRefName, stripSpaces } from '../lib/refname'
 import type { Commit, Ref, RepoSnapshot, Stash, CommitStat, GraphColumns } from '@shared/types'
+import { useWorktreeWips, WorktreeWipMessage, worktreeWipMenu, type WtWip } from './WorktreeWip'
 
 const ROW = 28
 const NONE: string[] = []
+
+/** the thumbtack of the original's "Jump to pinned branch" button */
+function PinIcon() {
+  const [w, h, , , d] = faThumbtack.icon
+  return <svg className="icon icon-thumbtack" viewBox={`0 0 ${w} ${h}`} aria-hidden="true" fill="currentColor"><path d={Array.isArray(d) ? d.join(' ') : d} /></svg>
+}
 const PAD = 28
+const FOOTER_H = 30
 
 interface Geo { lane: number; pad: number; compact: boolean }
 const laneX = (g: Geo, l: number) => g.pad + g.lane / 2 + l * g.lane
 
 type GRow =
-  | { kind: 'wip'; key: string }
+  | { kind: 'wip'; key: string; /** another worktree's uncommitted changes */ wt?: WtWip }
   | { kind: 'commit'; key: string; commit: Commit }
   | { kind: 'stash'; key: string; commit: Commit; stash: Stash }
 
@@ -62,12 +74,14 @@ function stashCommit(st: Stash, parents: string[]): Commit {
   return { sha: st.sha, parents, author: st.author ?? '', email: st.email ?? '', date: st.date, commitDate: st.date, committer: '', committerEmail: '', summary: parseStash(st.message, true).msg, body: '', stashIndex: st.index }
 }
 
-function buildRows(s: RepoSnapshot, visible: Set<string> | null, showStashes: boolean, hidden: string[]): GRow[] {
+function buildRows(s: RepoSnapshot, visible: Set<string> | null, showStashes: boolean, hidden: string[], wtWips: WtWip[] = []): GRow[] {
   const rows: GRow[] = []
   const dirty = s.status.staged.length + s.status.unstaged.length + s.status.conflicted.length > 0 || s.status.state.kind !== 'none'
   if (dirty) rows.push({ kind: 'wip', key: '__wip__' })
   // a stash is drawn by date, above the commit it was made on; only when that commit is in the graph
   const known = new Set(s.commits.filter((c) => !visible || visible.has(c.sha)).map((c) => c.sha))
+  // a WIP row for every other worktree with changes, like the original's worktree WIP nodes
+  for (const w of wtWips) if (known.has(w.sha)) rows.push({ kind: 'wip', key: `__wt__:${w.path}`, wt: w })
   const stashes = showStashes ? s.stashes.filter((st) => known.has(st.parents[0]) && !hidden.includes(stashKey(st.sha))).sort((a, b) => b.date - a.date) : []
   let si = 0
   for (const c of s.commits) {
@@ -81,13 +95,19 @@ function buildRows(s: RepoSnapshot, visible: Set<string> | null, showStashes: bo
   return rows
 }
 
-/** the optional columns right of the message, with their default widths */
+/** the optional columns right of the message, with the original's default / minimum / maximum widths */
 const EXTRA_COLS = [
-  { id: 'author', label: 'AUTHOR', width: 150 },
-  { id: 'date', label: 'DATE / TIME', width: 140 },
-  { id: 'sha', label: 'SHA', width: 76 },
-  { id: 'changes', label: 'CHANGES', width: 110 }
+  { id: 'author', label: 'AUTHOR', width: 130, min: 32, max: 175 },
+  { id: 'date', label: 'COMMIT DATE / TIME', width: 130, min: 50, max: 175 },
+  { id: 'sha', label: 'SHA', width: 64, min: 50, max: 100 },
+  { id: 'changes', label: 'CHANGES', width: 110, min: 50, max: 800 }
 ] as const
+/** the original's limits for the branch / tag and graph columns */
+const REF_W = { def: 130, compact: 32, min: 32, max: 300 }
+const GRAPH_MIN_W = 56
+/** below these widths the original shows an icon instead of the header text (and icon-only labels / avatars) */
+const REF_ICON_W = 55
+const AUTHOR_ICON_W = 55
 
 interface PopState { index: number; groups: RefGroup[]; lane: number; x: number; y: number; width: number }
 
@@ -97,6 +117,7 @@ export function Graph({ repo }: { repo: RepoView }) {
   const layoutSettings = useStore((st) => st.settings!.layout)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [range, setRange] = useState({ start: 0, end: 60 })
+  const [scrollbarW, setScrollbarW] = useState(0)
   const [hover, setHover] = useState<string | null>(null)
   const [hl, setHl] = useState<string[] | null>(null)
   const [pop, setPop] = useState<PopState | null>(null)
@@ -143,41 +164,28 @@ export function Graph({ repo }: { repo: RepoView }) {
   const stashBases = useMemo(() => (show.stashes ? s.stashes.filter((st) => !hidden.includes(stashKey(st.sha))).map((st) => st.parents[0]).filter(Boolean) : NONE), [s.stashes, hidden, show.stashes])
   const visOpts = useMemo(() => ({ hidden, solo, showRemotes: show.remotes, showTags: show.tags, headSha: s.head.sha, stashBases }), [hidden, solo, show.remotes, show.tags, s.head.sha, stashBases])
   const visibleSet = useMemo(() => visibleCommits(s.commits, s.refs, visOpts), [s.commits, s.refs, visOpts])
-  const rows = useMemo(() => buildRows(s, visibleSet, show.stashes, hidden), [s, visibleSet, show.stashes, hidden])
+  const wtWips = useWorktreeWips(path, s)
+  const rows = useMemo(() => buildRows(s, visibleSet, show.stashes, hidden, wtWips), [s, visibleSet, show.stashes, hidden, wtWips])
   useEffect(() => { if (cols.changes) void A2.loadStats(path) }, [cols.changes, s, path])
   const pinnedTip = useMemo(() => s.refs.find((r) => r.name === pinnedName)?.sha ?? null, [s.refs, pinnedName])
   const layout = useMemo(() => {
     const dashedRows = new Set<number>()
     rows.forEach((r, i) => { if (r.kind !== 'commit') dashedRows.add(i) })
-    return computeLayout(rows.map((r) => (r.kind === 'wip' ? { sha: '__wip__', parents: s.head.sha ? [s.head.sha] : [] } : r.commit)), { dashedRows, pinnedTip })
+    const wipRow = rows.findIndex((r) => r.kind === 'wip')
+    return computeLayout(rows.map((r) => (r.kind === 'wip' ? { sha: r.key, parents: r.wt ? [r.wt.sha] : s.head.sha ? [s.head.sha] : [] } : r.commit)), { dashedRows, pinnedTip, wipRow: wipRow >= 0 ? wipRow : undefined })
   }, [rows, s.head.sha, pinnedTip])
   const refsBySha = useMemo(() => groupRefs(s.refs.filter((r) => refIsShown(r, visOpts))), [s.refs, visOpts])
-  // the ghost label of a commit without labels: like the original, the branch at the top of its lane
-  // (following the first-parent child drawn in the same lane), or nothing when that lane ends unlabeled
-  const childInLane = useMemo(() => {
-    const m = new Map<number, number>()
-    const firstChild = new Map<string, number[]>()
-    rows.forEach((r, j) => { if (r.kind === 'commit' && r.commit.parents[0]) { const l = firstChild.get(r.commit.parents[0]) ?? []; l.push(j); firstChild.set(r.commit.parents[0], l) } })
-    rows.forEach((r, i) => {
-      if (r.kind !== 'commit') return
-      const j = (firstChild.get(r.commit.sha) ?? []).filter((k) => k < i && layout.rows[k]?.lane === layout.rows[i]?.lane).pop()
-      if (j !== undefined) m.set(i, j)
-    })
-    return m
-  }, [rows, layout])
+  // the ghost label of a commit without labels: like the original, the labels handed down from the
+  // first-parent child highest in the graph (see graph/ghost.ts)
+  const ghostSrc = useMemo(() => ghostSources(rows.map((r) => ({
+    sha: r.kind === 'wip' ? r.key : r.commit.sha,
+    parents: r.kind === 'wip' ? [] : r.commit.parents,
+    branch: r.kind === 'commit' && !!refsBySha.get(r.commit.sha)?.some((g) => g.local || g.remotes.length)
+  }))), [rows, refsBySha])
   const ghostFor = (i: number) => {
-    let cur = i
-    for (let n = 0; n < rows.length; n++) {
-      const next = childInLane.get(cur)
-      if (next === undefined) return null
-      cur = next
-      const row = rows[cur]
-      const groups = row.kind === 'commit' ? refsBySha.get(row.commit.sha) : undefined
-      const g = groups?.find((x) => x.local || x.remotes.length)
-      if (g) return { g, more: groups!.length - 1 }
-      if (groups?.length) return null
-    }
-    return null
+    const src = rows[ghostSrc[i]]
+    const groups = src?.kind === 'commit' ? refsBySha.get(src.commit.sha) : undefined
+    return groups?.length ? { g: groups[0], more: groups.length - 1 } : null
   }
   const order = useMemo(() => rows.map((r) => r.key), [rows])
   const indexOf = useMemo(() => new Map(order.map((k, i) => [k, i])), [order])
@@ -185,7 +193,8 @@ export function Graph({ repo }: { repo: RepoView }) {
 
   const refW = layoutSettings.refColWidth
   const topLanes = useMemo(() => layout.rows.slice(0, 150).reduce((m, r) => Math.max(m, r.width), 1), [layout])
-  const autoGraphW = Math.max(baseGeo.compact ? 50 : 100, Math.min(320, baseGeo.pad + baseGeo.lane * topLanes + 16))
+  // GitKraken measured 128 px for four lanes
+  const autoGraphW = Math.max(baseGeo.compact ? GRAPH_MIN_W : 100, Math.min(320, baseGeo.pad + baseGeo.lane * topLanes + 12))
   const graphW = layoutSettings.graphColWidth > 0 && !baseGeo.compact ? layoutSettings.graphColWidth : autoGraphW
   const geo: Geo = useMemo(() => {
     const lanes = Math.max(1, layout.maxLanes)
@@ -198,15 +207,35 @@ export function Graph({ repo }: { repo: RepoView }) {
   const persist = () => { void api.setSettings({ layout: useStore.getState().settings!.layout }) }
 
   const loadingMore = useRef(false)
+  // "Lazy Load Commits in Graph" off: the graph stops at the initial commits and ends with a footer, like the original
+  const lazy = settings.lazyLoadCommits !== false
   useEffect(() => {
-    if (!s.hasMore || loadingMore.current || range.end < rows.length - 40) return
+    if (!lazy || !s.hasMore || loadingMore.current || range.end < rows.length - 40) return
     loadingMore.current = true
     void A.loadMore(path).finally(() => { loadingMore.current = false })
-  }, [range.end, rows.length, s.hasMore, path])
+  }, [range.end, rows.length, s.hasMore, path, lazy])
+
+  // wheel: the original scrolls its own list by the wheel delta divided by the zoom factor (83 px for one
+  // 100 px notch at 110%), a bit slower than the browser's native scrolling
+  const zoomRef = useRef(1)
+  zoomRef.current = settings.zoom || 1
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.deltaMode !== 0 || !e.deltaY || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return
+      e.preventDefault()
+      el.scrollTop += e.deltaY / zoomRef.current
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
 
   const updateRange = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    // the header lines up with the rows: their right padding plus the scrollbar when there is one
+    setScrollbarW(el.offsetWidth - el.clientWidth)
     const start = Math.max(0, Math.floor(el.scrollTop / ROW) - 15)
     const end = Math.min(rows.length, Math.ceil((el.scrollTop + el.clientHeight) / ROW) + 15)
     setRange((r) => (r.start === start && r.end === end ? r : { start, end }))
@@ -263,11 +292,19 @@ export function Graph({ repo }: { repo: RepoView }) {
 
   const sel = repo.selection
   const selected = useMemo(() => new Set(sel?.kind === 'commits' ? sel.shas : sel?.kind === 'wip' ? ['__wip__'] : sel?.kind === 'compare' ? [sel.a, sel.b ?? '__wip__'] : []), [sel])
+  // the focused (last clicked) commit: the only selected row that shows a ghost label
+  const focused = sel?.kind === 'commits' ? sel.anchor : null
 
   // keyboard, like the original: ↑/↓ or K/J move, Shift moves along the branch (first parent / child),
   // Ctrl+Home / Ctrl+End jump to the first / last row
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.target as HTMLElement).closest?.('input, textarea')) return
     const k = e.key.toLowerCase()
+    // → / L "Select the Item to the Right": like the original, the first changed file of the selected commit
+    // (or of the work in progress) opens; ← / H goes back to the graph
+    const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
+    if (plain && (e.key === 'ArrowRight' || k === 'l')) { e.preventDefault(); void openFirstFile(); return }
+    if (plain && (e.key === 'ArrowLeft' || k === 'h')) { e.preventDefault(); if (repo.center.kind === 'file') A.closeCenter(path); return }
     const down = e.key === 'ArrowDown' || k === 'j'
     const up = e.key === 'ArrowUp' || k === 'k'
     const home = e.ctrlKey && e.key === 'Home'
@@ -287,8 +324,27 @@ export function Graph({ repo }: { repo: RepoView }) {
     } else i = Math.max(0, Math.min(order.length - 1, cur + (down ? 1 : -1)))
     const key = order[i]
     if (key === '__wip__') A.selectWip(path)
-    else A.selectCommit(path, key, {}, order)
+    else if (!key.startsWith('__wt__:')) A.selectCommit(path, key, {}, order)
     scrollToIndex(i)
+  }
+
+  const openFirstFile = async () => {
+    if (sel?.kind === 'wip') {
+      const st = s.status
+      const f = st.conflicted[0] ?? st.unstaged[0] ?? st.staged[0]
+      if (!f) return
+      if (st.conflicted.includes(f)) A.openMerge(path, f.path)
+      else A.openFile(path, st.unstaged.includes(f) ? { kind: 'unstaged', path: f.path, status: f.status } : { kind: 'staged', path: f.path, oldPath: f.oldPath, status: f.status })
+      return
+    }
+    if (sel?.kind !== 'commits' || sel.shas.length !== 1) return
+    const sha = sel.shas[0]
+    const stash = s.stashes.find((st) => st.sha === sha)
+    const parent = stash ? stash.parents[0] : s.commits.find((c) => c.sha === sha)?.parents[0]
+    const files = await api.commitFiles(path, sha, parent).catch(() => [])
+    const f = [...files].sort((a, b) => a.path.localeCompare(b.path))[0]
+    if (!f) return
+    A.openFile(path, { kind: stash ? 'stash' : 'commit', sha, parent, path: f.path, oldPath: f.oldPath, status: f.status })
   }
 
   const maxChanges = useMemo(() => {
@@ -316,14 +372,20 @@ export function Graph({ repo }: { repo: RepoView }) {
   const onLabelsLeave = useCallback(() => schedulePopClose(), []) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => cancelPopClose(), [])
 
-  const resetWidths = () => { setCol({ graphColWidth: 0, refColWidth: 150, colWidths: {} }); persist() }
+  const resetWidths = (compact = false) => { setCol({ graphColWidth: 0, refColWidth: compact ? REF_W.compact : REF_W.def, colWidths: compact ? { author: 32 } : {} }); persist() }
   const colW = (id: string) => layoutSettings.colWidths?.[id] ?? EXTRA_COLS.find((c) => c.id === id)?.width ?? 120
   const resizeCol = (id: string, dx: number) => {
     const l = useStore.getState().settings!.layout
-    if (id === 'ref') setCol({ refColWidth: Math.max(60, Math.min(500, l.refColWidth + dx)) })
-    else if (id === 'graph') setCol({ graphColWidth: Math.max(60, Math.min(800, (l.graphColWidth || autoGraphW) + dx)) })
-    else setCol({ colWidths: { ...(l.colWidths ?? {}), [id]: Math.max(48, Math.min(600, (l.colWidths?.[id] ?? EXTRA_COLS.find((c) => c.id === id)!.width) + dx)) } })
+    if (id === 'ref') setCol({ refColWidth: Math.max(REF_W.min, Math.min(REF_W.max, l.refColWidth + dx)) })
+    else if (id === 'graph') setCol({ graphColWidth: Math.max(GRAPH_MIN_W, Math.min(800, (l.graphColWidth || autoGraphW) + dx)) })
+    else {
+      const c = EXTRA_COLS.find((x) => x.id === id)!
+      setCol({ colWidths: { ...(l.colWidths ?? {}), [id]: Math.max(c.min, Math.min(c.max, (l.colWidths?.[id] ?? c.width) + dx)) } })
+    }
   }
+  // the column widths the rows use (saved or default), so every cell lines up with its header
+  const widths = useMemo(() => Object.fromEntries(EXTRA_COLS.map((c) => [c.id, layoutSettings.colWidths?.[c.id] ?? c.width])), [layoutSettings.colWidths])
+  const refIcons = refW < REF_ICON_W
 
   const visible: ReactNode[] = []
   let prevBucket = ''
@@ -331,7 +393,8 @@ export function Graph({ repo }: { repo: RepoView }) {
     const r = rows[i]
     const bucket = r.kind === 'wip' ? '' : relTime(r.commit.commitDate)
     // GitKraken marks the first row of each new age bucket, never the newest commit (the row after WIP included)
-    const showDate = i >= range.start && prevBucket !== '' && bucket !== '' && bucket !== prevBucket
+    // and, like the original, only while the Date / Time column is hidden
+    const showDate = !cols.date && i >= range.start && prevBucket !== '' && bucket !== '' && bucket !== prevBucket
     prevBucket = bucket
     if (i < range.start) continue
     visible.push(
@@ -343,7 +406,7 @@ export function Graph({ repo }: { repo: RepoView }) {
         lrow={layout.rows[i]}
         geo={geo}
         refs={r.kind === 'commit' ? refsBySha.get(r.commit.sha) : undefined}
-        ghost={settings.ghostRefs && r.kind === 'commit' && !refsBySha.get(r.commit.sha)?.length && (hover === r.key || selected.has(r.key)) ? ghostFor(i) : null}
+        ghost={settings.ghostRefs && r.kind === 'commit' && !refsBySha.get(r.commit.sha)?.length && (hover === r.key || focused === r.key) ? ghostFor(i) : null}
         showBody={settings.commitDescription === 'always' || (settings.commitDescription === 'hover' && (hover === r.key || selected.has(r.key)))}
         refW={refW}
         graphW={graphW}
@@ -351,7 +414,8 @@ export function Graph({ repo }: { repo: RepoView }) {
         hovered={hover === r.key}
         dimmed={(search.open && search.hits.length > 0 && !hitSet.has(r.key)) || (!!hlSet && r.kind !== 'wip' && !hlSet.has(r.key)) || (authorFilter.length > 0 && r.kind !== 'wip' && !authorFilter.includes(r.commit.email.toLowerCase()))}
         colOrder={colOrder}
-        colWidths={layoutSettings.colWidths}
+        colWidths={widths}
+        refIcons={refIcons}
         dateLabel={showDate ? bucket : null}
         newRef={repo.newRef && r.kind !== 'wip' && repo.newRef.sha === r.commit.sha ? repo.newRef.kind : null}
         wip={r.kind === 'wip' ? s.status : null}
@@ -388,12 +452,26 @@ export function Graph({ repo }: { repo: RepoView }) {
           <span className="graph-search-btn" title="Close" onClick={() => updateRepo(path, { search: { open: false, query: '', hits: [], index: 0 } })}><Icon name="times" /></span>
         </div></div>
       ) : null}
-      <div className="graph-header" onContextMenu={(e) => { e.preventDefault(); void graphHeaderMenu(path, resetWidths) }}>
-        {cols.ref ? <div className={`graph-header-col${dragCol === 'ref' ? ' dragging' : ''}`} {...headerCol('ref')} style={{ width: refW, order: colOrder.ref * 2 }}>BRANCH / TAG</div> : null}
-        {cols.graph ? <div className={`graph-header-col${dragCol === 'graph' ? ' dragging' : ''}`} {...headerCol('graph')} style={{ width: graphW, order: colOrder.graph * 2 }}>GRAPH</div> : null}
-        {cols.message ? <div className="graph-header-col grow" {...headerCol('message')}>COMMIT MESSAGE</div> : <div className="graph-header-col grow" style={{ order: colOrder.message * 2 }} />}
+      <div className="graph-header" style={{ paddingRight: 20 + scrollbarW }} onContextMenu={(e) => { e.preventDefault(); void graphHeaderMenu(path, resetWidths) }}>
+        {cols.ref ? (
+          <div className={`graph-header-col${dragCol === 'ref' ? ' dragging' : ''}${refIcons ? ' icon-only' : ''}`} {...headerCol('ref')} style={{ width: refW, order: colOrder.ref * 2 }}>
+            {refIcons ? <Icon name="code-branch" /> : <span className="graph-header-label">BRANCH / TAG</span>}
+          </div>
+        ) : null}
+        {cols.graph ? (
+          <div className={`graph-header-col${dragCol === 'graph' ? ' dragging' : ''}`} {...headerCol('graph')} style={{ width: graphW, order: colOrder.graph * 2 }}>
+            <span className="graph-header-label">GRAPH</span>
+            {/* like the original: a pin in the graph header selects the pinned branch */}
+            {pinnedTip ? <span className="graph-header-action" title="Jump to pinned branch" draggable={false} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); A.selectCommit(path, pinnedTip); scrollToIndex(indexOf.get(pinnedTip) ?? -1, true) }}><PinIcon /></span> : null}
+          </div>
+        ) : null}
+        {cols.message ? <div className="graph-header-col grow" {...headerCol('message')}><span className="graph-header-label">COMMIT MESSAGE</span></div> : <div className="graph-header-col grow" style={{ order: colOrder.message * 2 }} />}
         {EXTRA_COLS.filter((c) => cols[c.id]).map((c) => (
-          <div key={c.id} className={`graph-header-col extra-col col-${c.id}${dragCol === c.id ? ' dragging' : ''}`} {...headerCol(c.id)} style={{ width: colW(c.id), order: colOrder[c.id] * 2 }}>{c.label}</div>
+          <div key={c.id} className={`graph-header-col extra-col col-${c.id}${dragCol === c.id ? ' dragging' : ''}`} {...headerCol(c.id)} style={{ width: colW(c.id), order: colOrder[c.id] * 2 }}>
+            {c.id === 'author' && colW('author') < AUTHOR_ICON_W ? <Icon name="user" /> : <span className="graph-header-label">{c.label}</span>}
+            {/* the author filter sits in the Author header, like the original */}
+            {c.id === 'author' ? <span className={`graph-header-filter${authorFilter.length ? ' active' : ''}`} title="Filter" draggable={false} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); setFilterOpen((v) => !v) }}><Icon name="filter" /></span> : null}
+          </div>
         ))}
         {/* every fixed-width column can be resized: on its right edge left of the message column, on its left edge right of it */}
         {(['ref', 'graph', ...EXTRA_COLS.map((c) => c.id)] as const).filter((id) => cols[id]).map((id) => {
@@ -401,8 +479,7 @@ export function Graph({ repo }: { repo: RepoView }) {
           return <Resizer key={`rz-${id}`} className="col-resizer" style={{ order: colOrder[id] * 2 + (before ? 1 : -1) }} onDrag={(dx) => resizeCol(id, before ? dx : -dx)} onEnd={persist} />
         })}
         <span className="graph-header-icons" draggable={false} onMouseDown={(e) => e.stopPropagation()} onDragStart={(e) => { e.preventDefault(); e.stopPropagation() }}>
-          <span className="graph-header-gear" title="Columns settings" onClick={() => graphHeaderMenu(path, resetWidths)}><Icon name="cog" /></span>
-          {cols.author ? <span className={`graph-header-filter${authorFilter.length ? ' active' : ''}`} title="Filter the graph by author" onClick={() => setFilterOpen((v) => !v)}><Icon name="filter" /></span> : null}
+          <span className="graph-header-gear" title="Column settings" onClick={() => graphHeaderMenu(path, resetWidths)}><Icon name="cog" /></span>
         </span>
       </div>
       {filterOpen ? <AuthorFilter repo={repo} onClose={() => setFilterOpen(false)} /> : null}
@@ -415,11 +492,17 @@ export function Graph({ repo }: { repo: RepoView }) {
         </div>
       ) : null}
       <div className={`graph-scroll${cols.ref ? '' : ' no-ref-col'}${cols.graph ? '' : ' no-graph-col'}${cols.message ? '' : ' no-message-col'}`} ref={scrollRef} tabIndex={0} onScroll={() => { updateRange(); setPop(null) }} onKeyDown={onKeyDown} onMouseLeave={() => setHover(null)}>
-        <div className="graph-inner" style={{ height: rows.length * ROW + (s.hasMore ? 40 : 0) }}>
+        {/* like the original, 8px of padding after the last row */}
+        <div className="graph-inner" style={{ height: rows.length * ROW + (lazy ? (s.hasMore ? 40 : 0) : FOOTER_H) + 8 }}>
           {visible}
-          {s.hasMore ? (
+          {lazy && s.hasMore ? (
             <div className="graph-load-more" style={{ top: rows.length * ROW }}>
               <span className="text-secondary">Loading more commits…</span>
+            </div>
+          ) : null}
+          {!lazy && rows.length ? (
+            <div className="graph-adjust-commit-count" style={{ top: rows.length * ROW }}>
+              Displaying {s.commits.length} commits. Adjust this setting in <a className="btn-link" href="#" onClick={(e) => { e.preventDefault(); openModal('prefs') }}>Preferences</a>
             </div>
           ) : null}
         </div>
@@ -454,7 +537,9 @@ interface RowProps {
   dimmed: boolean
   dateLabel: string | null
   colOrder: Record<string, number>
-  colWidths?: Record<string, number>
+  colWidths: Record<string, number>
+  /** branch / tag column narrower than the original's icon width: icon-only labels */
+  refIcons: boolean
   newRef: 'branch' | 'tag' | 'annotated-tag' | null
   wip: RepoSnapshot['status'] | null
   wipSummary: string
@@ -477,12 +562,13 @@ const GraphRow = memo(function GraphRow(p: RowProps) {
 
   const onClick = (e: React.MouseEvent) => {
     if (e.detail === 1 && A.repoView(path).detailHidden) updateRepo(path, { detailHidden: false })
-    if (row.kind === 'wip') A.selectWip(path)
+    if (row.kind === 'wip') { if (!row.wt) A.selectWip(path) }
     else A.selectCommit(path, row.key, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey }, p.order)
   }
   const onContext = (e: React.MouseEvent) => {
     e.preventDefault()
-    if (row.kind === 'wip') { A.selectWip(path); void wipMenu(path); return }
+    // the original's only item on the WIP row is an AI one: no menu here
+    if (row.kind === 'wip') { if (row.wt) void worktreeWipMenu(path, row.wt); else A.selectWip(path); return }
     if (!p.selected) A.selectCommit(path, row.key)
     if (row.kind === 'stash') { void stashMenu(path, row.stash); return }
     // like the original: a row carrying a branch label opens that branch's menu (tags alone keep the commit menu)
@@ -499,18 +585,18 @@ const GraphRow = memo(function GraphRow(p: RowProps) {
       style={{ top: p.index * ROW }}
       data-sha={row.kind === 'wip' ? undefined : row.commit.sha}
       onClick={onClick}
-      onDoubleClick={() => { if (row.kind === 'commit') updateRepo(path, { detailHidden: true }) }}
+      onDoubleClick={() => { if (row.kind === 'commit') updateRepo(path, { detailHidden: true }); else if (row.kind === 'wip' && row.wt) void worktreeWipMenu(path, row.wt, true) }}
       onContextMenu={onContext}
       onMouseEnter={() => p.onHover(row.key)}
     >
       {p.cols.ref ? (
         <div className="ref-zone" style={{ width: p.refW, order: p.colOrder.ref }}>
           {p.newRef ? <NewRefInput path={path} kind={p.newRef} /> : hasRefs ? (
-            <RefLabels path={path} groups={p.refs!} lane={lane} width={p.refW} rowSelected={p.selected} index={p.index} onEnter={p.onLabelsEnter} onLeave={p.onLabelsLeave} />
+            <RefLabels path={path} groups={p.refs!} lane={lane} width={p.refW} rowSelected={p.selected} index={p.index} iconOnly={p.refIcons} onEnter={p.onLabelsEnter} onLeave={p.onLabelsLeave} />
           ) : p.ghost ? (
             <div className="ref-labels dim-labels" style={{ maxWidth: p.refW - 6 }}>
-              <RefLabel path={path} g={p.ghost.g} lane={lane} bright={false} ghost />
-              {p.ghost.more > 0 ? <span className="ref-more" style={{ background: laneMix(lane, 0.25) }}>+{p.ghost.more}</span> : null}
+              <RefLabel path={path} g={p.ghost.g} lane={lane} bright={false} ghost iconOnly={p.refIcons} />
+              {p.ghost.more > 0 && !p.refIcons ? <span className="ref-more" style={{ background: laneMix(lane, 0.25) }}>+{p.ghost.more}</span> : null}
             </div>
           ) : null}
           {hasRefs || p.newRef || p.ghost ? <div className={`ref-line${isCurrent ? ' is-active' : ''}${p.ghost && !hasRefs ? ' ghost' : ''}`} style={{ background: color, left: 2 }} /> : null}
@@ -524,9 +610,10 @@ const GraphRow = memo(function GraphRow(p: RowProps) {
           <Node row={row} lane={lane} x={nodeX} compact={geo.compact} />
         </div>
       ) : null}
-      <div className="message-zone" style={{ order: p.colOrder.message }}>
+      {/* native tooltips on the cells, like the original: full message, author with e-mail, date, short sha */}
+      <div className="message-zone" style={{ order: p.colOrder.message }} {...(row.kind !== 'wip' && p.cols.message ? { title: row.commit.body ? `${row.commit.summary}\n\n${row.commit.body}` : row.commit.summary, 'data-native-title': '' } : {})}>
         <div className="color-strip" style={{ background: color }} />
-        {p.cols.message ? (row.kind === 'wip' ? <WipMessage path={path} wip={p.wip!} summary={p.wipSummary} /> : (
+        {p.cols.message ? (row.kind === 'wip' ? (row.wt ? <WorktreeWipMessage wt={row.wt} /> : <WipMessage path={path} wip={p.wip!} summary={p.wipSummary} />) : (
           <span className="message-text">
             <span className="message-summary">{row.commit.summary}</span>
             {row.commit.body && p.showBody ? <span className="message-body">{bodyLine(row.commit.body)}</span> : null}
@@ -534,10 +621,16 @@ const GraphRow = memo(function GraphRow(p: RowProps) {
         )) : null}
         {p.dateLabel ? <span className="date-label">{p.dateLabel}</span> : null}
       </div>
-      {p.cols.author ? <div className="extra-col col-author" style={{ order: p.colOrder.author, width: p.colWidths?.author }}>{row.kind === 'commit' ? <span className="truncate">{row.commit.author}</span> : null}</div> : null}
-      {p.cols.date ? <div className="extra-col col-date" style={{ order: p.colOrder.date, width: p.colWidths?.date }}>{row.kind !== 'wip' ? fullDate(row.commit.date) : ''}</div> : null}
-      {p.cols.sha ? <div className="extra-col col-sha" style={{ order: p.colOrder.sha, width: p.colWidths?.sha }}>{row.kind === 'commit' ? row.commit.sha.slice(0, 7) : ''}</div> : null}
-      {p.cols.changes ? <div className="extra-col col-changes" style={{ order: p.colOrder.changes, width: p.colWidths?.changes }}>{p.stat ? <ChangesBar stat={p.stat} max={p.maxChanges} /> : null}</div> : null}
+      {p.cols.author ? (
+        <div className="extra-col col-author" style={{ order: p.colOrder.author, width: p.colWidths.author }} {...(row.kind !== 'wip' ? { title: `${row.commit.author} <${row.commit.email}>`, 'data-native-title': '' } : {})}>
+          {row.kind === 'wip' ? null : p.colWidths.author < AUTHOR_ICON_W
+            ? <span className="extra-avatar" style={{ backgroundImage: `url(${avatarUrl(row.commit.email, row.commit.author)})` }} />
+            : <span className="extra-text">{row.commit.author}</span>}
+        </div>
+      ) : null}
+      {p.cols.date ? <div className="extra-col col-date" style={{ order: p.colOrder.date, width: p.colWidths.date }} {...(row.kind !== 'wip' ? { title: fullDate(row.commit.date), 'data-native-title': '' } : {})}>{row.kind !== 'wip' ? <span className="extra-text">{fullDate(row.commit.date)}</span> : null}</div> : null}
+      {p.cols.sha ? <div className="extra-col col-sha" style={{ order: p.colOrder.sha, width: p.colWidths.sha }} {...(row.kind === 'commit' ? { title: row.commit.sha.slice(0, 6), 'data-native-title': '' } : {})}>{row.kind === 'commit' ? <span className="extra-text">{row.commit.sha.slice(0, 6)}</span> : null}</div> : null}
+      {p.cols.changes ? <div className="extra-col col-changes" style={{ order: p.colOrder.changes, width: p.colWidths.changes }}>{p.stat ? <ChangesBar stat={p.stat} max={p.maxChanges} /> : null}</div> : null}
     </div>
   )
 })
@@ -580,22 +673,23 @@ function Edges({ edges, node, width, geo }: { edges: Edge[]; node: number; width
 function Node({ row, lane, x, compact }: { row: GRow; lane: number; x: number; compact: boolean }) {
   const color = laneColor(lane)
   if (row.kind === 'wip') {
-    const sz = compact ? 16 : 26
+    // the original: a 22x22 circle with a dashed 1.82px border
+    const sz = compact ? 16 : 22
     return (
-      <svg className="node wip-node" style={{ left: x - sz / 2, top: 14 - sz / 2 }} width={sz} height={sz} viewBox="0 0 26 26">
-        <circle cx="13" cy="13" r="10" fill="var(--app__bg0)" stroke={color} strokeWidth={2} strokeDasharray="2 3" strokeLinecap="round" />
+      <svg className="node wip-node" style={{ left: x - sz / 2, top: 14 - sz / 2 }} width={sz} height={sz} viewBox="0 0 22 22">
+        <circle cx="11" cy="11" r="10.09" fill="var(--app__bg0)" stroke={color} strokeWidth={1.82} strokeDasharray="2 3" strokeLinecap="round" />
       </svg>
     )
   }
   if (row.kind === 'stash') {
-    return <div className="node stash-node" style={{ left: x - 10, top: 4, borderColor: color, color }}><Icon name="stash-tray" /></div>
+    return <div className="node stash-node" style={{ left: x - 11, top: 3, borderColor: color, color }}><Icon name="stash-tray" /></div>
   }
   const c = row.commit
-  if (compact || c.parents.length > 1) return <div className="node merge-node" style={{ left: x - 6, top: 8, background: color }} />
+  if (compact || c.parents.length > 1) return <div className="node merge-node" style={{ left: x - 6, top: 8, background: color, borderColor: color }} />
   return <div className="node avatar-node" title={`${c.author} <${c.email}>`} style={{ left: x - 11, top: 3, borderColor: color, backgroundImage: `url(${avatarUrl(c.email, c.author)})` }} />
 }
 
-function RefLabels({ path, groups, lane, width, rowSelected, index, onEnter, onLeave }: { path: string; groups: RefGroup[]; lane: number; width: number; rowSelected: boolean; index: number; onEnter: RowProps['onLabelsEnter']; onLeave: () => void }) {
+function RefLabels({ path, groups, lane, width, rowSelected, index, iconOnly, onEnter, onLeave }: { path: string; groups: RefGroup[]; lane: number; width: number; rowSelected: boolean; index: number; iconOnly: boolean; onEnter: RowProps['onLabelsEnter']; onLeave: () => void }) {
   const first = groups[0]
   const rest = groups.length - 1
   const ref = useRef<HTMLDivElement>(null)
@@ -606,38 +700,43 @@ function RefLabels({ path, groups, lane, width, rowSelected, index, onEnter, onL
       style={{ maxWidth: width - 6 }}
       onMouseEnter={(e) => {
         const lbl = ref.current?.querySelector('.ref-name') as HTMLElement | null
-        const truncated = !!lbl && lbl.scrollWidth > lbl.clientWidth + 1
+        const truncated = iconOnly || (!!lbl && lbl.scrollWidth > lbl.clientWidth + 1)
         onEnter(index, groups, lane, e.currentTarget, first, truncated)
       }}
       onMouseLeave={onLeave}
     >
-      <RefLabel path={path} g={first} lane={lane} bright={first.current || rowSelected} />
-      {rest > 0 ? <span className="ref-more" style={{ background: laneMix(lane, 0.25) }}>+{rest}</span> : null}
+      <RefLabel path={path} g={first} lane={lane} bright={first.current || rowSelected} iconOnly={iconOnly} />
+      {rest > 0 && !iconOnly ? <span className="ref-more" style={{ background: laneMix(lane, 0.25) }}>+{rest}</span> : null}
     </div>
   )
 }
 
-function RefLabel({ path, g, lane, bright, full, ghost }: { path: string; g: RefGroup; lane: number; bright: boolean; full?: boolean; ghost?: boolean }) {
+function RefLabel({ path, g, lane, bright, full, ghost, iconOnly }: { path: string; g: RefGroup; lane: number; bright: boolean; full?: boolean; ghost?: boolean; iconOnly?: boolean }) {
   const ref = g.local ?? g.primary
   // like the original: a branch checked out in another worktree shows the worktree icon instead of the laptop
   const inWorktree = !!g.local && !g.current && !!A.snap(path)?.worktrees.some((w) => !w.isCurrent && w.branch === g.local!.short)
+  // a branch / tag column narrower than the original's icon width: a 22px chip with one icon
+  // (check for the current branch, laptop for a local one, cloud for a remote, tag for a tag)
+  const only = iconOnly && !full ? (g.current ? 'check' : g.local ? (inWorktree ? 'tree-o' : 'laptop-o') : g.remotes.length ? 'cloud-o' : 'tag-o') : null
   return (
     <span
-      className={`ref-node${g.current ? ' is-active' : ''}${full ? ' full' : ''}${ghost ? ' dim-ref' : ''}`}
+      className={`ref-node${g.current ? ' is-active' : ''}${full ? ' full' : ''}${ghost ? ' dim-ref' : ''}${only ? ' icon-only' : ''}`}
+      title={tagAnnotation(g.tag, A.snap(path)?.commits ?? [])}
       style={{ ['--rl-bg' as string]: laneMix(lane, bright ? 0.5 : 0.25), ['--rl-bg-hover' as string]: laneMix(lane, bright ? 0.5 : 0.45) }}
       onClick={(e) => { if (ghost) return; e.stopPropagation(); A.selectCommit(path, ref.sha) }}
       onDoubleClick={(e) => { if (ghost) return; e.stopPropagation(); void A.checkoutRef(path, ref) }}
       onContextMenu={(e) => { if (ghost) return; e.preventDefault(); e.stopPropagation(); A.selectCommit(path, ref.sha); void refGroupMenu(path, g.refs) }}
       {...(g.tag || ghost ? {} : refDragProps(path, ref))}
     >
-      {g.current ? <span className="ref-icon"><Icon name="check" className="ref-check" /></span> : null}
-      <span className="ref-name">{g.label}</span>
-      <span className="ref-icons">
-        {g.local ? <Icon name={inWorktree ? 'tree-o' : 'laptop-o'} /> : null}
-        {g.remotes.length ? <Icon name="cloud-o" /> : null}
-        {g.tag ? <Icon name="tag-o" /> : null}
-      </span>
-
+      {only ? <span className="ref-icons"><Icon name={only} className={only === 'check' ? 'ref-check' : undefined} /></span> : <>
+        {g.current ? <span className="ref-icon"><Icon name="check" className="ref-check" /></span> : null}
+        <span className="ref-name">{g.label}</span>
+        <span className="ref-icons">
+          {g.local ? <Icon name={inWorktree ? 'tree-o' : 'laptop-o'} /> : null}
+          {g.remotes.length ? <Icon name="cloud-o" /> : null}
+          {g.tag ? <Icon name="tag-o" className="ref-tag-icon" /> : null}
+        </span>
+      </>}
     </span>
   )
 }
@@ -647,14 +746,14 @@ function NewRefInput({ path, kind }: { path: string; kind: string }) {
   const done = useRef(false)
   return (
     <input
-      className="new-ref-input"
+      className={`new-ref-input${isInvalidRefName(v) ? ' invalid' : ''}`}
       autoFocus
       placeholder={kind === 'branch' ? 'enter branch name' : 'enter tag name'}
       value={v}
       onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setV(e.target.value.replace(/\s/g, '-'))}
+      onChange={(e) => setV(stripSpaces(e.target.value))}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') { done.current = true; void A.submitNewRef(path, v) }
+        if (e.key === 'Enter') { if (isInvalidRefName(v)) return; done.current = true; void A.submitNewRef(path, v) }
         else if (e.key === 'Escape') { done.current = true; updateRepo(path, { newRef: null }) }
       }}
       onBlur={() => { if (!done.current) updateRepo(path, { newRef: null }) }}

@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
 import { g, out, tryOut, net, identityEnv, getGitflowConfig, graphRevs } from './git'
-import { GitError, parseLfsPatterns } from './gitcore'
+import { GitError, parseLfsPatterns, parseTrackedFiles, assertWritable } from './gitcore'
 import type { CommitStat, GitflowConfig, LfsInfo, OpResult, SshKey, GpgKey } from '../shared/types'
 
 // ---------------------------------------------------------------------------------------------
@@ -39,8 +39,24 @@ export async function getTreeFiles(cwd: string, sha: string): Promise<string[]> 
   return (await out(cwd, ['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean)
 }
 
+/** a repository without any commit (the original asks to make one before opening it) */
+export async function repoIsEmpty(cwd: string): Promise<boolean> {
+  if ((await tryOut(cwd, ['rev-parse', '--verify', '-q', 'HEAD'])) !== null) return false
+  return (await tryOut(cwd, ['rev-list', '-n', '1', '--all']))?.trim() === ''
+}
+
+/** the original's "make a commit for you": README.md ("# <name>", kept if it exists) committed as "Initial commit" */
+export async function makeInitialCommit(cwd: string): Promise<void> {
+  assertWritable('making an initial commit')
+  const readme = path.join(cwd, 'README.md')
+  if (!existsSync(readme)) await fs.writeFile(readme, `# ${path.basename(cwd)}\n`, 'utf8')
+  await g(cwd, ['add', '--', 'README.md'])
+  await g(cwd, ['commit', '-m', 'Initial commit'], { env: await identityEnv(cwd) })
+}
+
+/** the file finder's list (Ctrl+P > History / Blame / View File…): tracked files only, like the original */
 export async function listFiles(cwd: string): Promise<string[]> {
-  return (await out(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])).split('\0').filter(Boolean)
+  return parseTrackedFiles(await out(cwd, ['ls-files', '-z', '-s']))
 }
 
 export async function readRepoFile(cwd: string, file: string): Promise<string> {
@@ -191,7 +207,9 @@ function runDetached(command: string, cwd: string): Promise<void> {
 
 export async function openInEditor(cwd: string, file: string | null, editor: string): Promise<void> {
   const target = file ? `"${path.join(cwd, file)}"` : `"${cwd}"`
-  await runDetached(`${editor || 'code'} ${target}`, cwd)
+  // a "Custom" editor command may carry a {path} placeholder; otherwise the path is appended
+  const cmd = editor.includes('{path}') ? editor.split('{path}').join(target) : `${editor || 'code'} ${target}`
+  await runDetached(cmd, cwd)
 }
 
 /** Launches the user's configured git mergetool / difftool (e.g. VS Code, Beyond Compare, KDiff3). */

@@ -1,0 +1,5 @@
+#!/bin/sh
+# SuperGit command line for Git Bash and other POSIX shells on Windows:
+# supergit [path | supergit:// link] (supergit --help lists the options)
+dir=$(dirname "$0")
+ELECTRON_RUN_AS_NODE=1 "$dir/../../SuperGit.exe" "$dir/../app.asar/out/main/cli.js" "$@"

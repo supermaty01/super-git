@@ -10,14 +10,14 @@ import {
   faBars, faFolderTree, faFilter, faTree, faTrash, faArrowUp, faArrowDown, faTriangleExclamation, faMinus, faPen, faArrowRightArrowLeft, faEllipsisVertical,
   faCodeMerge, faCodeCommit, faArrowsRotate, faCircleInfo, faArrowUpRightFromSquare, faFloppyDisk, faParagraph, faAlignLeft, faHouse, faCodeCompare,
   faInbox, faCircleCheck, faCircleXmark, faSpinner, faGripLines, faFileLines, faClockRotateLeft, faUser, faFolderOpen, faFolderPlus, faDownload,
-  faCompress, faExpand, faLink, faCircle, faLock, faServer, faKey, faRightFromBracket, faCaretUp
+  faCompress, faExpand, faLink, faCircle, faLock, faServer, faKey, faRightFromBracket, faCaretUp, faCircleNotch, faBroom
 } from '@fortawesome/free-solid-svg-icons'
 import { faGithub, faGitlab, faBitbucket, faMicrosoft } from '@fortawesome/free-brands-svg-icons'
 
 const FA: Record<string, IconDefinition> = {
   folder: farFolder, 'folder-open': farFolderOpen, 'folder-solid-open': faFolderOpen, 'folder-plus': faFolderPlus, bell: faBell, clock: faClock,
   keyboard: faKeyboard, copy: faCopy, file: faFile, 'file-lines': faFileLines, times: faXmark, plus: faPlus, 'chevron-down': faChevronDown,
-  'chevron-right': faChevronRight, 'chevron-up': faChevronUp, 'chevron-left': faChevronLeft, cog: faGear, 'caret-down': faCaretDown, 'caret-up': faCaretUp, 'circle-o': farCircle, 'dot-circle-o': farCircleDot,
+  'chevron-right': faChevronRight, 'chevron-up': faChevronUp, 'chevron-left': faChevronLeft, cog: faGear, 'caret-down': faCaretDown, 'caret-up': faCaretUp, 'circle-notch': faCircleNotch, 'circle-o': farCircle, 'dot-circle-o': farCircleDot,
   search: faMagnifyingGlass, 'code-branch': faCodeBranch, undo: faRotateLeft, redo: faRotateRight, terminal: faTerminal,
   'chevron-circle-left': faCircleChevronLeft, 'chevron-circle-right': faCircleChevronRight, list: faList, laptop: faLaptop, cloud: faCloud,
   tag: faTag, check: faCheck, pencil: faPencil, 'sort-alpha': faArrowUpAZ, bars: faBars, 'folder-tree': faFolderTree, filter: faFilter, tree: faTree,
@@ -27,7 +27,7 @@ const FA: Record<string, IconDefinition> = {
   house: faHouse, compare: faCodeCompare, inbox: faInbox, 'check-circle': faCircleCheck, 'x-circle': faCircleXmark, spinner: faSpinner,
   grip: faGripLines, history: faClockRotateLeft, user: faUser, download: faDownload, compress: faCompress, expand: faExpand, link: faLink,
   eye: faEye, 'eye-slash': faEyeSlash, square: farSquare, circle: faCircle, lock: faLock,
-  github: faGithub, gitlab: faGitlab, bitbucket: faBitbucket, microsoft: faMicrosoft, server: faServer, key: faKey, 'sign-out': faRightFromBracket
+  github: faGithub, gitlab: faGitlab, bitbucket: faBitbucket, microsoft: faMicrosoft, server: faServer, key: faKey, 'sign-out': faRightFromBracket, broom: faBroom
 }
 
 /** Hand-drawn glyphs for icons that only exist in commercial icon sets. Drawn on a 16x16 grid with strokes. */

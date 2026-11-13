@@ -1,0 +1,61 @@
+/* ===== graph: parity with the original (header, columns, labels, nodes) ===== */
+
+/* header cells: 10px monospace, .45, no letter-spacing, ellipsis (the strings are uppercase themselves) */
+.graph-header-col, .graph-header .extra-col {
+  font-family: Monaco, Menlo, 'Ubuntu Mono', Consolas, source-code-pro, monospace; font-size: 10px; letter-spacing: normal;
+  text-transform: none; color: var(--text-disabled); display: flex; align-items: center; gap: 4px; min-width: 0;
+}
+.graph-header .extra-col { flex: 0 0 auto; padding: 0 0 0 8px; line-height: 22px; }
+.graph-header-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+.graph-header-col > .icon { width: 11px; height: 11px; flex: 0 0 auto; }
+.graph-header-col.icon-only { justify-content: center; padding-left: 0; }
+.graph-header .col-author .graph-header-filter { margin-left: auto; margin-right: 4px; flex: 0 0 auto; }
+.graph-header-action { margin-left: auto; margin-right: 6px; color: var(--text-disabled); cursor: pointer; display: flex; align-items: center; flex: 0 0 auto; }
+.graph-header-action:hover { color: var(--text-selected); }
+.graph-header-action .icon { width: 10px; height: 10px; }
+
+/* resize handle: 10px hit area, the 1px divider turns into a 2px blue bar on hover */
+.graph-header .col-resizer::after { left: -5px; right: -4px; }
+.graph-header .col-resizer { transition: background-color 0s, box-shadow 0s; margin: 0 -1px 0 0; }
+.graph-header .col-resizer:hover { background: var(--selected-row); box-shadow: 1px 0 0 var(--selected-row); transition-delay: .05s; }
+
+/* the search bar sits above the header icons */
+.graph-search { z-index: 8; }
+
+/* extra columns: fixed widths, .45 text with ellipsis, part of the hovered / selected row */
+.graph-row .extra-col { flex: 0 0 auto; min-width: 0; padding: 0 5px 0 8px; color: var(--text-disabled); transition: color .2s ease-in; }
+.graph-row .message-zone, .graph-header-col.grow { min-width: 50px; }
+.extra-col .extra-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.graph-row.hovered .extra-col { background: linear-gradient(var(--hover-row), var(--hover-row)) 0 3px / 100% 22px no-repeat; }
+.graph-row.selected .extra-col { background: linear-gradient(var(--selected-row), var(--selected-row)) 0 3px / 100% 22px no-repeat; color: #fff; }
+.graph-row .col-author .extra-avatar { width: 16px; height: 16px; }
+
+/* ref labels: check 12px + 6px, name + 5px, local / remote icons 15px wide, tag 12px */
+.ref-node { gap: 0; padding: 0 5px; }
+.ref-node .ref-icon { width: 12px; margin-right: 6px; justify-content: center; }
+.ref-node .ref-icon .ref-check { width: 12px; height: 12px; }
+.ref-node .ref-name { margin-right: 5px; line-height: 18px; }
+.ref-icons { gap: 0; opacity: 1; }
+.ref-icons .icon { width: 15px; height: 15px; }
+.ref-icons .icon.ref-tag-icon { width: 12px; }
+.ref-labels .ref-node .ref-name { min-width: 0; }
+/* icon-only labels in a narrow branch / tag column */
+.ref-node.icon-only { width: 22px; padding: 0; justify-content: center; flex: 0 0 22px; }
+.ref-node.icon-only .ref-icons .icon { width: 12px; height: 12px; }
+
+/* the WIP row in a narrow message column: the change counts stay on one line */
+.work-dir-row { min-width: 0; overflow: hidden; }
+.tiny-files-readout { flex: 0 0 auto; white-space: nowrap; }
+
+/* nodes */
+.merge-node { box-sizing: border-box; border: 1.82px solid; border-color: inherit; }
+.stash-node { width: 22px; height: 22px; box-sizing: border-box; border-width: 1.82px; border-style: dotted; }
+.stash-node .icon { width: 14px; height: 14px; }
+
+/* end of the graph when lazy loading is off */
+.graph-adjust-commit-count { position: absolute; left: 0; right: 0; height: 30px; display: flex; align-items: center; padding: 0 8px; font-size: 1.2rem; color: var(--text-secondary); }
+.graph-adjust-commit-count .btn-link { color: var(--blue); margin-left: 4px; cursor: pointer; }
+.graph-adjust-commit-count .btn-link:hover { text-decoration: underline; }
+
+/* the original draws its rows on a composited layer: greyscale text anti-aliasing instead of sub-pixel */
+.graph-scroll .graph-inner { will-change: transform; }

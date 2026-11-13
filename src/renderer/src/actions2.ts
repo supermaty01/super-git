@@ -1,7 +1,7 @@
 // Additional actions: visibility, compare, patches, gitflow, submodules, tabs, terminal, external tools.
 import { api } from './lib/api'
 import { getState, setState, updateRepo, toast, dismissToast, openModal, showPrompt } from './store'
-import { run, runOp, snap, repoView, orderOldestFirst, openRepo, closeTab, persistTabs } from './actions'
+import { run, runOp, noopAware, snap, repoView, orderOldestFirst, openRepo, closeTab, persistTabs } from './actions'
 import { basename } from './lib/format'
 import type { Settings, Stash } from '@shared/types'
 
@@ -86,29 +86,19 @@ export async function applyPatch(path: string): Promise<void> {
     buttons: ['As commits', 'To working directory', 'Cancel'], type: 'question'
   })
   if (r === 2) return
-  await runOp(path, () => api.applyPatch(path, file, r === 0), 'Apply patch')
+  await runOp(path, () => api.applyPatch(path, file, r === 0), 'Apply patch', undefined, undefined, noopAware('Patch Apply Successful', 'patch'))
 }
 
 // ---------------------------------------------------------------------------------------------
 // gitflow
 
+/** the original's Gitflow slide-out forms (components/GitflowPanel.tsx) */
 export function gitflowStartDialog(path: string, type: 'feature' | 'release' | 'hotfix'): void {
-  const label = type[0].toUpperCase() + type.slice(1)
-  openModal('prompt', {
-    title: `Gitflow: start ${type}`, okLabel: `Start ${label}`,
-    fields: [{ name: 'name', label: type === 'feature' ? 'Feature name' : 'Version', placeholder: type === 'feature' ? 'my-feature' : '1.2.0' }],
-    onOk: (v: Record<string, string>) => run(path, () => api.gitflowStart(path, type, v.name.trim().replace(/\s+/g, '-')), { errorTitle: `Could not start ${type}` })
-  })
+  void import('./components/GitflowPanel').then((m) => m.openGitflowForm(path, 'start', type))
 }
 
 export async function gitflowFinish(path: string, type: 'feature' | 'release' | 'hotfix', name: string): Promise<void> {
-  const cfg = snap(path).gitflow
-  const detail = type === 'feature'
-    ? `Merges ${cfg.feature}${name} into ${cfg.develop} (--no-ff).`
-    : `Merges into ${cfg.master}, tags ${cfg.versionTag}${name}, then merges back into ${cfg.develop}.`
-  const r = await api.confirm({ title: `Finish ${type}`, message: `Finish ${type} "${name}"?`, detail, buttons: ['Finish and delete branch', 'Finish and keep branch', 'Cancel'], type: 'question' })
-  if (r === 2) return
-  await runOp(path, () => api.gitflowFinish(path, type, name, { deleteBranch: r === 0 }), `Finish ${type}`, 'Finishing')
+  void import('./components/GitflowPanel').then((m) => m.openGitflowForm(path, 'finish', type, name))
 }
 
 /** Recognizes gitflow branches: returns the type and short name (or null). */
@@ -168,7 +158,7 @@ export async function loadStats(path: string): Promise<void> {
   try { updateRepo(path, { stats: await api.commitStats(path, v.limit) }) } catch { /* optional data */ }
 }
 
-export const openInEditor = (path: string, file: string | null) => run(path, () => api.openInEditor(path, file), { refresh: false, errorTitle: 'Could not open the external editor' })
+export const openInEditor = (path: string, file: string | null, editor?: string) => run(path, () => api.openInEditor(path, file, editor), { refresh: false, errorTitle: 'Could not open the external editor' })
 
 export async function externalMergeTool(path: string, file: string): Promise<void> {
   const r = await run(path, () => api.externalMergeTool(path, file), { busy: 'Waiting for merge tool' })
@@ -239,8 +229,9 @@ export async function pullAllRepos(paths: string[]): Promise<void> {
 }
 
 /** "Open this worktree": the worktree takes the place of the current tab */
-export async function openInThisTab(current: string, target: string): Promise<void> {
+export async function openInThisTab(current: string, target: string): Promise<string | undefined> {
   const tab = getState().tabs.find((t) => t.path === current)
-  await openRepo(target)
-  if (tab && getState().tabs.some((t) => t.path === target)) await closeTab(tab.id)
+  const at = await openRepo(target)
+  if (tab && at && tab.path !== at && getState().tabs.some((t) => t.path === at)) await closeTab(tab.id)
+  return at
 }

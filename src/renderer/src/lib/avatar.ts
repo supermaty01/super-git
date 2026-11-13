@@ -47,11 +47,10 @@ export function avatarUrl(email: string, name = ''): string {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = size * px
   const ctx = canvas.getContext('2d')!
-  const hue = Math.round((bytes[0] / 255) * 360)
-  const hue2 = (hue + 120 + Math.round((bytes[1] / 255) * 120)) % 360
-  ctx.fillStyle = `hsl(${hue2}, 55%, ${22 + (bytes[2] % 14)}%)`
+  // the palette of the original's retro avatars: dark slate background, cream figure
+  ctx.fillStyle = 'rgb(31, 60, 81)'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.fillStyle = `hsl(${hue}, 75%, ${55 + (bytes[3] % 15)}%)`
+  ctx.fillStyle = 'rgb(244, 220, 173)'
   // 4 columns x 8 rows, mirrored horizontally
   let bit = 0
   const bits = (n: number) => (bytes[4 + ((n >> 3) % 4)] >> (n & 7)) & 1

@@ -1,7 +1,7 @@
 {
   "name": "super-git",
   "productName": "SuperGit",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "A lightweight, local-only desktop Git client for Windows",
   "main": "./out/main/index.js",
   "author": "Mateo Álvarez",
@@ -92,6 +92,12 @@
       "artifactName": "SuperGit-Setup-${version}.exe",
       "uninstallDisplayName": "SuperGit"
     },
+    "extraResources": [
+      {
+        "from": "build/bin",
+        "to": "bin"
+      }
+    ],
     "asarUnpack": [
       "**/node_modules/@lydell/**"
     ],

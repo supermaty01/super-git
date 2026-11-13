@@ -46,6 +46,8 @@ export interface Layout {
 export interface LayoutOptions {
   /** rows whose connection to their parent is drawn dashed (WIP, stashes) */
   dashedRows?: Set<number>
+  /** the work-in-progress row (one of `dashedRows`): its line leads to HEAD, it is not a stash */
+  wipRow?: number
   /** sha of a branch tip pinned to the left-most lane */
   pinnedTip?: string | null
 }
@@ -62,6 +64,8 @@ interface Line {
   /** set on a merged side branch: the commit it was merged onto (it never takes that one over) */
   mergedOnto: string | null
   dashed: boolean
+  /** the dashed line comes from the work-in-progress row, not from a stash */
+  wip: boolean
   /** the line continues a lane a stash opened: it never takes a commit over */
   fromStash: boolean
 }
@@ -72,7 +76,7 @@ export function computeLayout(commits: LayoutCommit[], dashedFirst: boolean | La
   // pinned branch: lane 0 is reserved for its first-parent chain
   let reserve0 = false
   if (opts.pinnedTip && commits.some((c) => c.sha === opts.pinnedTip)) {
-    lanes.push({ sha: opts.pinnedTip, claimRow: -1, locked: true, fromMerge: false, mergedOnto: null, dashed: false, fromStash: false })
+    lanes.push({ sha: opts.pinnedTip, claimRow: -1, locked: true, fromMerge: false, mergedOnto: null, dashed: false, wip: false, fromStash: false })
     reserve0 = true
   }
   const rows: LayoutRow[] = []
@@ -148,7 +152,9 @@ export function computeLayout(commits: LayoutCommit[], dashedFirst: boolean | La
         fromMerge: isMerge,
         mergedOnto: isMerge ? null : own?.mergedOnto ?? null,
         dashed: isDashedNode,
-        fromStash: !isMerge && !!own && (own.dashed || own.fromStash)
+        wip: rowIdx === opts.wipRow,
+        // only a stash's lane is marked: the work-in-progress line leads to HEAD, whose chain may take commits over
+        fromStash: !isMerge && !!own && ((own.dashed && !own.wip) || own.fromStash)
       }
       edges.push({ t: 'v', lane: node, from: 0.5, to: 1, dashed: isDashedNode || undefined })
     } else if (node === 0) reserve0 = false
@@ -158,7 +164,7 @@ export function computeLayout(commits: LayoutCommit[], dashedFirst: boolean | La
       let target: number
       if (!waiting.length) {
         target = freeLane()
-        lanes[target] = { sha: p, claimRow: rowIdx, locked: true, fromMerge: false, mergedOnto: p0 ?? null, dashed: false, fromStash: false }
+        lanes[target] = { sha: p, claimRow: rowIdx, locked: true, fromMerge: false, mergedOnto: p0 ?? null, dashed: false, wip: false, fromStash: false }
       } else {
         // lines already on their way to this parent: the merge line joins the one the parent would be drawn
         // in, which now belongs to the side branch being merged here, and the parent stays there

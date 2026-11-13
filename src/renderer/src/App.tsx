@@ -5,17 +5,21 @@ import { api } from './lib/api'
 import { TabsBar } from './components/TabsBar'
 import { RepoScreen } from './components/RepoScreen'
 import { RepoManagement } from './components/RepoManagement'
+import { NewTab } from './components/NewTab'
 import { StatusBar } from './components/StatusBar'
 import { Toasts } from './components/Toasts'
+import { HookBar } from './components/HookBar'
 import { TooltipLayer } from './components/Tooltip'
 import { Modals } from './components/Modals'
 import { CommandPalette } from './components/CommandPalette'
-import { applyTheme } from './components/PrefsModal'
+import { applyTheme, watchSystemTheme } from './lib/theme'
+import { stepZoom } from './lib/zoom'
 import { setAvatarMode } from './lib/avatar'
-import { setDateFormat } from './lib/format'
+import { setDateFormat, setCustomDateTime } from './lib/format'
 import { setEditorPrefs } from './lib/monaco'
 import * as A2 from './actions2'
-import { openModal } from './store'
+import { openModal, toast } from './store'
+import { openDeepLink } from './deeplink'
 
 /** Commands from the application menu (and a few shortcuts that share them). */
 export function runCommand(cmd: string): void {
@@ -28,9 +32,13 @@ export function runCommand(cmd: string): void {
   if (cmd.startsWith('term:')) { window.dispatchEvent(new CustomEvent('sg-terminal', { detail: cmd.slice(5) })); return }
   if (cmd === 'app:check-updates') { void A.checkForUpdates(); return }
   if (cmd.startsWith('open:')) { void A.openRepo(cmd.slice(5)); return }
+  // `supergit <path>` / supergit://repo/<path> for a folder that is not in a repository
+  if (cmd.startsWith('deeplink:')) { void openDeepLink(cmd.slice(9)); return }
+  if (cmd.startsWith('open-failed:')) { toast({ kind: 'error', title: 'Invalid Filepath', message: `Could not find repo at ${cmd.slice(12)}` }); return }
   if (cmd.startsWith('favorite:')) { const p = s.settings!.favorites[Number(cmd.slice(9)) - 1]; if (p) void A.openRepo(p); return }
   switch (cmd) {
-    case 'tab:new': case 'repo:management': void A.activateTab(MGMT_TAB); break
+    case 'tab:new': void A.newTab(); break
+    case 'repo:management': void A.activateTab(MGMT_TAB); break
     case 'tab:close': if (s.activeTab !== MGMT_TAB) void A.closeTab(s.activeTab); break
     case 'tab:reopen': void A.reopenClosedTab(); break
     case 'tab:next': case 'tab:prev': {
@@ -48,8 +56,8 @@ export function runCommand(cmd: string): void {
     case 'prefs': openModal('prefs'); break
     case 'undo': if (typing()) document.execCommand('undo'); else if (path) void A.undo(path); break
     case 'redo': if (typing()) document.execCommand('redo'); else if (path) void A.redo(path); break
-    case 'zoom:in': void api.setZoom((s.settings?.zoom ?? 1) + 0.1); break
-    case 'zoom:out': void api.setZoom((s.settings?.zoom ?? 1) - 0.1); break
+    case 'zoom:in': void api.setZoom(stepZoom(s.settings?.zoom ?? 1, 1)); break
+    case 'zoom:out': void api.setZoom(stepZoom(s.settings?.zoom ?? 1, -1)); break
     case 'zoom:reset': void api.setZoom(1); break
     case 'panel:left': A2.saveSettings({ layout: { ...layout(), leftOpen: !layout().leftOpen } }); break
     case 'panel:detail': A2.saveSettings({ layout: { ...layout(), rightOpen: layout().rightOpen === false } }); break
@@ -79,31 +87,33 @@ export function App() {
   if (set) {
     setAvatarMode(set.authorInitials)
     setDateFormat(set.dateFormat, set.clock)
+    setCustomDateTime(set.dateLocale, set.dateFormats)
   }
   useEffect(() => {
     if (set) setEditorPrefs({ fontSize: set.editorFontSize, tabSize: set.editorTabSize, lineNumbers: set.editorLineNumbers, syntax: set.editorSyntax, eol: set.editorEol })
   }, [set?.editorFontSize, set?.editorTabSize, set?.editorLineNumbers, set?.editorSyntax, set?.editorEol]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { applyTheme(theme) }, [theme])
+  useEffect(() => watchSystemTheme(() => useStore.getState().settings?.theme ?? '', () => applyTheme('system')), [])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey
       const path = activeRepoPath()
       const key = e.key.toLowerCase()
-      if (ctrl && (key === '=' || key === '+')) { e.preventDefault(); void api.setZoom(zoom + 0.1) }
-      else if (ctrl && key === '-') { e.preventDefault(); void api.setZoom(zoom - 0.1) }
+      if (ctrl && (key === '=' || key === '+')) { e.preventDefault(); void api.setZoom(stepZoom(zoom, 1)) }
+      else if (ctrl && key === '-') { e.preventDefault(); void api.setZoom(stepZoom(zoom, -1)) }
       else if (ctrl && key === '0') { e.preventDefault(); void api.setZoom(1) }
       else if (ctrl && e.shiftKey && key === 'o') { e.preventDefault(); setState({ palette: 'repos' }) }
       else if (ctrl && e.shiftKey && key === 'a') { e.preventDefault(); setState({ tabsList: true }) }
       else if (ctrl && e.shiftKey && key === 'h' && path) { e.preventDefault(); setState({ palette: 'history' }) }
-      else if (ctrl && key === 'p') { e.preventDefault(); setState({ palette: true }) }
+      else if (ctrl && key === 'p') { e.preventDefault(); setState({ palette: !getState().palette }) }
       else if (ctrl && e.shiftKey && key === 't') { e.preventDefault(); void A.reopenClosedTab() }
-      else if (ctrl && key === 't') { e.preventDefault(); void A.activateTab(MGMT_TAB) }
+      else if (ctrl && key === 't') { e.preventDefault(); void A.newTab() }
       else if (ctrl && key === ',') { e.preventDefault(); openModal('prefs') }
       else if (ctrl && key === '/') { e.preventDefault(); openModal('shortcuts') }
       else if (ctrl && key === '`' && path) { e.preventDefault(); A2.toggleTerminal(path) }
       else if (ctrl && key === 'k' && path) { e.preventDefault(); runCommand('panel:detail') }
-      else if (ctrl && key === 'w') {
+      else if (ctrl && !e.shiftKey && key === 'w') {
         // "Close File/Tab": an open file view closes first, then the tab
         e.preventDefault()
         const s = getState()
@@ -159,6 +169,7 @@ export function App() {
   const detailPanel = useStore((s) => s.settings?.layout.rightOpen !== false)
   const terminal = useStore((s) => { const p = activeRepoPath(); return p ? !!s.repos[p]?.terminal : false })
   const favorites = useStore((s) => s.settings?.favorites)
+  const isNewTabActive = useStore((s) => s.tabs.some((t) => t.id === s.activeTab && A.isNewTab(t)))
   useEffect(() => { void api.setMenuState({ hasRepo, leftPanel, detailPanel, terminal, favorites: favorites ?? [] }) }, [hasRepo, leftPanel, detailPanel, terminal, favorites])
 
   if (!ready) return <div className="app" />
@@ -166,8 +177,9 @@ export function App() {
     <div className="app">
       <TabsBar />
       <div className="app-body">
-        {activeTab === MGMT_TAB ? <RepoManagement /> : <RepoScreen />}
+        {activeTab === MGMT_TAB ? <RepoManagement /> : isNewTabActive ? <NewTab /> : <RepoScreen />}
       </div>
+      <HookBar />
       <StatusBar />
       <Toasts />
       <TooltipLayer />
@@ -177,7 +189,7 @@ export function App() {
   )
 }
 
-function openSearch(path: string) {
+export function openSearch(path: string) {
   const v = A.repoView(path)
   if (!v) return
   setState((s) => ({ repos: { ...s.repos, [path]: { ...v, search: { ...v.search, open: true } } } }))

@@ -105,7 +105,6 @@
   --conflict-right-color: rgba(242, 202, 51, 0.3);
   --conflict-output-color: rgba(197, 23, 182, 0.15);
 }
-[data-theme='light'] .tabs-bar, [data-theme='light'] .toolbar { --text-normal: rgba(0,0,0,.8); --text-secondary: rgba(0,0,0,.6); }
 [data-theme='light'] .toolbar-btn:hover:not(:disabled) { background: rgba(0,0,0,.05); }
 [data-theme='light'] .crumb-text, [data-theme='light'] .file-view-title, [data-theme='light'] .mt-file { color: #000; }
 [data-theme='light'] { --toggle-border: rgba(0,0,0,.2); }
@@ -114,3 +113,4 @@
 [data-theme='light'] .pill { color: #fff; }
 [data-theme='light'] .hunk-line .code, [data-theme='light'] .blame-line .code { color: #333; }
 [data-theme='light'] .wip-banner { background: #5f8eed; }
+[data-skin='light-legacy'] .toolbar-btn:hover:not(:disabled), [data-skin='light-hc-legacy'] .toolbar-btn:hover:not(:disabled) { background: rgba(255,255,255,.08); }

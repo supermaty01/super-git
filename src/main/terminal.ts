@@ -16,7 +16,12 @@ let nextId = 1
 
 function shellFor(kind: string): { file: string; args: string[] } {
   if (kind === 'cmd') return { file: 'cmd.exe', args: [] }
-  if (kind === 'pwsh') return { file: 'pwsh.exe', args: ['-NoLogo'] }
+  if (kind === 'pwsh') {
+    const dirs = [...(process.env.PATH ?? '').split(path.delimiter), process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'PowerShell', '7')]
+    const found = dirs.filter(Boolean).map((d) => path.join(d as string, 'pwsh.exe')).find((c) => existsSync(c))
+    if (!found) throw new Error('PowerShell 7 (pwsh.exe) is not installed. Pick another shell from the terminal\'s shell menu.')
+    return { file: found, args: ['-NoLogo'] }
+  }
   if (kind === 'gitbash') {
     const candidates = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')]
       .filter(Boolean).map((b) => path.join(b as string, 'Git', 'bin', 'bash.exe'))

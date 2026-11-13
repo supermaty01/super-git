@@ -12,6 +12,7 @@ function PromptBar({ p }: { p: PromptSpec }) {
   const [value, setValue] = useState(p.kind === 'input' ? p.value ?? '' : p.kind === 'upstream' ? '' : '')
   const [remote, setRemote] = useState(p.kind === 'upstream' ? p.remote : '')
   const [noAsk, setNoAsk] = useState(false)
+  const [checked, setChecked] = useState(p.kind === 'input' ? p.checkbox?.value ?? false : false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -26,7 +27,7 @@ function PromptBar({ p }: { p: PromptSpec }) {
     if (p.kind === 'input') {
       if (!value.trim() && (!p.extraButtons || p.requireValue)) return
       closePrompt()
-      void p.onSubmit(value)
+      void p.onSubmit(value, checked)
     } else if (p.kind === 'upstream') {
       closePrompt()
       void p.onSubmit(remote, value.trim() || p.branch)
@@ -69,7 +70,10 @@ function PromptBar({ p }: { p: PromptSpec }) {
             )) : null}
           </>
         )}
-        <button className="btn btn-xs prompt-btn btn-default" onClick={closePrompt}>Cancel</button>
+        <button className="btn btn-xs prompt-btn btn-default" onClick={closePrompt}>{p.kind === 'confirm' && p.cancelLabel ? p.cancelLabel : 'Cancel'}</button>
+        {p.kind === 'input' && p.checkbox ? (
+          <label className="prompt-check"><input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} /> {p.checkbox.label}</label>
+        ) : null}
         {p.kind === 'confirm' && p.dontAskAgain ? (
           <label className="prompt-check"><input type="checkbox" checked={noAsk} onChange={(e) => setNoAsk(e.target.checked)} /> Don't ask again</label>
         ) : null}

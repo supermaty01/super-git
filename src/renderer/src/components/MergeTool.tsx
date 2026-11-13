@@ -6,8 +6,9 @@ import * as A from '../actions'
 import * as A2 from '../actions2'
 import { monaco, createModel, editorOptions } from '../lib/monaco'
 import { errMsg } from '../lib/format'
-import { useStore } from '../store'
+import { useStore, showPrompt } from '../store'
 import { Icon } from './Icon'
+import { EncodingDropdown } from './DiffExtras'
 import type { ConflictSides } from '@shared/types'
 
 type Region =
@@ -39,7 +40,7 @@ export function computeRegions(sides: ConflictSides): { regions: Region[]; eol: 
 
 interface OutputInfo { text: string; marks: Array<{ start: number; end: number; kind: 'a' | 'b' | 'out' }>; conflictStarts: number[] }
 
-function buildOutput(regions: Region[], picks: Record<number, Pick>): OutputInfo {
+function buildOutput(regions: Region[], picks: Record<number, Pick>, markers = false): OutputInfo {
   const out: string[] = []
   const marks: OutputInfo['marks'] = []
   const conflictStarts: number[] = []
@@ -47,6 +48,10 @@ function buildOutput(regions: Region[], picks: Record<number, Pick>): OutputInfo
     if (r.kind === 'ok') { out.push(...r.lines); continue }
     conflictStarts.push(out.length + 1)
     const p = picks[r.id]
+    if (markers && (!p || (!p.a.length && !p.b.length))) {
+      out.push('<<<<<<< ours', ...r.a, '=======', ...r.b, '>>>>>>> theirs')
+      continue
+    }
     if (!p || (!p.a.length && !p.b.length)) {
       const start = out.length + 1
       out.push(...(r.o.length ? r.o : ['']))
@@ -73,6 +78,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
   useEffect(() => { for (const ed of [eds.current.a, eds.current.b, eds.current.o]) ed?.updateOptions({ wordWrap: wrap ? 'on' : 'off' }) }, [wrap])
   const [current, setCurrent] = useState(0)
   const [dirty, setDirty] = useState(false)
+  const [askSave, setAskSave] = useState(false)
   const font = useStore((s) => s.settings!.editorFont)
   const aEl = useRef<HTMLDivElement>(null)
   const bEl = useRef<HTMLDivElement>(null)
@@ -127,22 +133,32 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
   useEffect(() => {
     if (!sides || !model) return
     const common: monaco.editor.IStandaloneEditorConstructionOptions = {
-      automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontFamily: `${font}, Consolas, monospace`, ...editorOptions(true),
-      glyphMargin: true, folding: false, lineDecorationsWidth: 6, contextmenu: false, scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 }
+      automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontFamily: `${font}, Consolas, "Courier New", monospace`, ...editorOptions(true),
+      glyphMargin: true, folding: false, lineDecorationsWidth: 22, contextmenu: false, scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 }
     }
     const a = monaco.editor.create(aEl.current!, { ...common, readOnly: true, model: createModel(model.ours.join('\n'), file) })
     const b = monaco.editor.create(bEl.current!, { ...common, readOnly: true, model: createModel(model.theirs.join('\n'), file) })
     const o = monaco.editor.create(oEl.current!, { ...common, readOnly: false, model: createModel('', file) })
     const onGlyph = (side: 'a' | 'b') => (e: monaco.editor.IEditorMouseEvent) => {
       const t = e.target.type
-      if (t !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && t !== monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS) return
       const ln = e.target.position?.lineNumber
       if (!ln) return
       const hit = lineMapRef.current[side].get(ln - 1)
-      if (hit) toggleRef.current(side, hit[0], 'all')
+      if (!hit) return
+      if (t === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || t === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS) toggleRef.current(side, hit[0], 'all')
+      else if (t === monaco.editor.MouseTargetType.GUTTER_LINE_DECORATIONS) toggleRef.current(side, hit[0], hit[1])
+    }
+    const hoverTitle = (side: 'a' | 'b', host: HTMLElement | null) => (e: monaco.editor.IEditorMouseEvent) => {
+      if (!host) return
+      const ln = e.target.position?.lineNumber
+      const hit = ln ? lineMapRef.current[side].get(ln - 1) : undefined
+      const chosen = hit ? picksRef.current[hit[0]]?.[side].includes(hit[1]) : false
+      host.title = hit && e.target.type === monaco.editor.MouseTargetType.GUTTER_LINE_DECORATIONS ? (chosen ? "Don't take this line" : 'Take this line') : ''
     }
     a.onMouseDown(onGlyph('a'))
     b.onMouseDown(onGlyph('b'))
+    a.onMouseMove(hoverTitle('a', aEl.current))
+    b.onMouseMove(hoverTitle('b', bEl.current))
     o.onDidChangeModelContent((ev) => { if (!ev.isFlush) setDirty(true) })
     // keep A/B scrolled together
     a.onDidScrollChange((e) => { if (e.scrollTopChanged) b.setScrollTop(e.scrollTop) })
@@ -171,7 +187,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
             options: {
               isWholeLine: true,
               className: side === 'a' ? 'mt-line-a' : 'mt-line-b',
-              linesDecorationsClassName: side === 'a' ? 'mt-bar-a' : 'mt-bar-b',
+              linesDecorationsClassName: `${side === 'a' ? 'mt-bar-a' : 'mt-bar-b'} mt-take${chosen.includes(i) ? ' on' : ''}`,
               glyphMarginClassName: i === 0 ? `mt-check${whole ? ' checked' : ''}` : undefined
             }
           })
@@ -217,39 +233,54 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
   }
   const unresolved = conflicts.filter((c) => !picks[c.id] || (!picks[c.id].a.length && !picks[c.id].b.length)).length
 
-  const save = async () => {
-    const o = eds.current.o
-    if (!o || !model) return
-    if (unresolved && !dirty) {
-      const r = await api.confirm({ title: 'Unresolved conflicts', message: `${unresolved} conflict(s) have no selection.`, detail: 'The output will contain the original (base) text for those sections. Save anyway?', buttons: ['Save', 'Cancel'], type: 'warning' })
-      if (r !== 0) return
-    }
-    let text = o.getValue().replace(/\r\n/g, '\n')
-    if (model.finalNewline && !text.endsWith('\n')) text += '\n'
-    if (model.eol === '\r\n') text = text.replace(/\n/g, '\r\n')
+  const write = async (outText: string) => {
+    let text = outText.replace(/\r\n/g, '\n')
+    if (model!.finalNewline && !text.endsWith('\n')) text += '\n'
+    if (model!.eol === '\r\n') text = text.replace(/\n/g, '\r\n')
     const ok = await A.run(path, async () => { await api.resolveConflict(path, file, text); return true }, { errorTitle: 'Could not save the resolution' })
     if (ok) A.closeCenter(path)
+  }
+  const save = async (chunks = false) => {
+    const o = eds.current.o
+    if (!o || !model) return
+    // like the original: with nothing picked at all it offers to save the ancestor
+    if (unresolved && !dirty && !askSave && unresolved === conflicts.length) {
+      showPrompt({ kind: 'confirm', message: 'You did not pick A or B. Would you like to save your ancestor?', buttons: [{ label: 'Save Ancestor', style: 'warning', run: () => write(o.getValue()) }] })
+      return
+    }
+    if (unresolved && !dirty && !askSave) { setAskSave(true); return }
+    setAskSave(false)
+    await write(chunks && unresolved && !dirty ? buildOutput(model.regions, picks, true).text : o.getValue())
   }
 
   if (err) return <div className="file-view-message">{err}</div>
   const st = repo.snapshot!.status.state
   return (
     <div className="merge-tool">
+      {askSave ? (
+        <div className="mt-banner">
+          <span>You have unresolved conflicts. How would you like to proceed?</span>
+          <button className="btn btn-success btn-small" onClick={() => void save(false)}>Save Output</button>
+          <button className="btn btn-danger btn-small" onClick={() => void save(true)}>Create Conflict Chunks</button>
+          <button className="btn btn-default btn-small" onClick={() => setAskSave(false)}>Cancel</button>
+        </div>
+      ) : null}
       <div className="mt-topbar">
         <Icon name="warning" className="color-orange" />
         <span className="mt-file">{file}</span>
         <span className="text-secondary">({conflicts.length} conflict{conflicts.length === 1 ? '' : 's'})</span>
         <span className="grow" />
         <button className={`toggle-btn icon-only${wrap ? ' checked' : ''}`} title="Word Wrap" onClick={() => setWrap(!wrap)}><Icon name="align-left" /></button>
-        <span className="fv-encoding">UTF-8</span>
+        <EncodingDropdown />
         <button className="btn btn-primary-outline btn-small" onClick={() => A2.externalMergeTool(path, file)}>Open in external merge tool <Icon name="external" /></button>
-        <button className="btn btn-success btn-small" onClick={save}>Save <Icon name="save" /></button>
+        <button className="btn btn-success btn-small" onClick={() => void save()}>Save <Icon name="save" /></button>
         <span className="file-view-close" title="Close" onClick={() => A.closeCenter(path)}><Icon name="times" /></span>
       </div>
+      {sides && !conflicts.length ? <div className="mt-auto-resolved"><Icon name="check-circle" /> Merge tool automatically resolved your conflict</div> : null}
       <div className="mt-top">
         <div className="mt-pane">
           <div className="mt-pane-header">
-            <input type="checkbox" checked={allSide('a')} onChange={() => toggleAll('a')} />
+            <input type="checkbox" title={allSide('a') ? 'Untake all' : 'Take all'} checked={allSide('a')} onChange={() => toggleAll('a')} />
             <span className="mt-badge mt-badge-a">A</span>
             <span>Commit {sides?.oursSha.slice(0, 6)} on <i className="mt-branch-a">{sides?.oursLabel}</i>{st.kind === 'rebase' ? <span className="text-secondary"> (upstream)</span> : null}</span>
           </div>
@@ -257,7 +288,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
         </div>
         <div className="mt-pane">
           <div className="mt-pane-header">
-            <input type="checkbox" checked={allSide('b')} onChange={() => toggleAll('b')} />
+            <input type="checkbox" title={allSide('b') ? 'Untake all' : 'Take all'} checked={allSide('b')} onChange={() => toggleAll('b')} />
             <span className="mt-badge mt-badge-b">B</span>
             <span>Commit {sides?.theirsSha.slice(0, 6)} on <i className="mt-branch-b">{sides?.theirsLabel}</i></span>
           </div>
@@ -274,7 +305,7 @@ export function MergeTool({ repo, file }: { repo: RepoView; file: string }) {
             <button className="btn btn-xs btn-nav" onClick={() => gotoConflict(current + 1)}><Icon name="chevron-down" /></button>
           </span>
           <span className="grow" />
-          {Object.keys(picks).length || dirty ? <button className="btn btn-default btn-xs" onClick={() => { setPicks({}); setDirty(false); if (eds.current.o && output) eds.current.o.setValue(buildOutput(model!.regions, {}).text) }}>Reset</button> : <span style={{ width: 40 }} />}
+          {Object.keys(picks).length || dirty ? <button className="btn btn-default btn-xs" title="Clear Selections" onClick={() => { setPicks({}); setDirty(false); if (eds.current.o && output) eds.current.o.setValue(buildOutput(model!.regions, {}).text) }}>Reset</button> : <span style={{ width: 40 }} />}
         </div>
         <div className="mt-editor" ref={oEl} />
       </div>

@@ -257,16 +257,27 @@ export interface Settings {
   activeTab: string | null
   recent: RecentRepo[]
   favorites: string[]
+  /** Repository Management: folders searched for repositories ("Add a Projects Folder") */
+  projectFolders?: string[]
+  /** Repository Management: show branch / ahead-behind / changes for every row ("WIP summary") */
+  repoWipSummary?: boolean
+  /** tabs of a repository and its worktrees sit together in a framed group ("Automatically group worktree tabs together") */
+  groupWorktreeTabs?: boolean
   showWhitespace: boolean
   wordWrap: boolean
   editorFont: string
   hiddenRefs: Record<string, string[]>
   soloRefs: Record<string, string[]>
   autoFetchMinutes: number
-  theme: 'dark' | 'light'
+  /** 'gk-dark' (default), 'dark' (Dark - High Contrast, the original id), 'light', 'light-legacy', 'light-hc-legacy', 'light-hc' or 'system' */
+  theme: string
   graphColumns: GraphColumns
   /** graph column order (ids of GraphColumns), set by dragging the headers */
   graphColumnOrder?: string[]
+  /** 2: graph column defaults follow the original (Author, Date / Time and Sha visible, 130 px branch column) */
+  graphLayoutVersion?: number
+  /** load more commits when scrolling to the end of the graph (off: the graph ends with a footer instead) */
+  lazyLoadCommits?: boolean
   graphShow: { tags: boolean; stashes: boolean; remotes: boolean }
   externalEditor: string
   terminalShell: 'powershell' | 'pwsh' | 'cmd' | 'gitbash'
@@ -301,6 +312,23 @@ export interface Settings {
   clock: '24h' | '12h'
   toastPosition: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left'
   spellcheck: boolean
+
+  // Preferences round 2 (all optional: unset = the original's default)
+  /** BCP-47 locale for dates ('' / unset = system) and moment-style custom formats */
+  dateLocale?: string
+  dateFormats?: { date?: string; dateWord?: string; dateTime?: string; dateVerbose?: string }
+  /** Merge Behavior: local merges stage the changes without creating the merge commit */
+  mergeSquash?: boolean
+  /** log extra detail (stdout/stderr) in the activity log */
+  extendedLogging?: boolean
+  /** path to sh.exe used for hooks and shell commands ('' = the one bundled with git) */
+  shPath?: string
+  /** external editor preset id ('' = the free-text command in externalEditor) and its custom commands */
+  editorPreset?: string
+  editorOpenFileCmd?: string
+  editorOpenRepoCmd?: string
+  /** external terminal preset id */
+  terminalPreset?: string
 
   // Commit
   pushAfterCommit: boolean
@@ -342,6 +370,8 @@ export interface Settings {
   autoUpdate: boolean
   /** branch visibility for repositories opened for the first time */
   defaultSmartVisibility: boolean
+  /** branch cleanup, conflict prevention, gitflow and worktree options (see k2.ts) */
+  k2?: import('./k2').K2Settings
 }
 
 export type ProviderId = 'github' | 'github-enterprise' | 'gitlab' | 'gitlab-self' | 'bitbucket' | 'bitbucket-server' | 'azure'
@@ -433,6 +463,8 @@ export interface OpResult {
   autoStash?: AutoStash
   /** pull: nothing came in (HEAD did not move) */
   upToDate?: boolean
+  /** cherry pick / revert / patch: the branch already had all of these changes, so nothing changed */
+  noop?: boolean
 }
 
 export type AutoStash = 'popped' | 'kept'

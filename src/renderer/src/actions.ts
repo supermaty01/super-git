@@ -1,10 +1,15 @@
 // All user-triggered operations: they call the git backend, report errors as toasts and refresh state.
 import { api, bridge } from './lib/api'
 import {
-  getState, setState, updateRepo, newRepoView, toast, openModal, showPrompt, MGMT_TAB, type RepoView, type Selection, type CenterView
+  getState, setState, useStore, updateRepo, newRepoView, toast, TOAST_SHORT, openModal, showPrompt, MGMT_TAB, type RepoView, type Selection, type CenterView
 } from './store'
 import type { UpdateState, RepoSnapshot, Ref, Commit, FileChange, FileContext, OpResult, ResetMode, PullMode, RebaseTodoItem, Stash, Worktree, MenuItemSpec, TabInfo, AutoStash } from '@shared/types'
 import { errMsg, basename } from './lib/format'
+import { handleProgress } from './opsFeedback'
+import { topoRange } from './graph/range'
+import { promptCreateRef, openMergeOrPrompt } from './quickMenus'
+import { runStaging, statusNewerThan } from './staging'
+import * as W from './lib/wipStatus'
 
 // ---------------------------------------------------------------------------------------------
 // bootstrapping & tabs
@@ -20,9 +25,12 @@ export async function init(): Promise<void> {
   setState({ settings, tabs, activeTab: active })
   bridge().onRepoChanged((p) => {
     const tab = activeTab()
-    if (tab && tab.path === p) void refresh(p)
+    if (!tab || tab.path !== p) return
+    // changes made by the app's own operation are picked up by the refresh that follows it (no refresh storm)
+    if (opsInFlight.get(p)) changedDuringOp.add(p)
+    else void refresh(p)
   })
-  bridge().onProgress((e) => setState({ progress: { repo: e.repo, text: e.text } }))
+  bridge().onProgress((e) => { if (!handleProgress(e)) setState({ progress: { repo: e.repo, text: e.text } }) })
   bridge().onZoom((z) => setState((s) => ({ settings: s.settings ? { ...s.settings, zoom: z } : s.settings })))
   bridge().onUpdate(onUpdate)
   window.addEventListener('focus', () => { const t = activeTab(); if (t) void refresh(t.path) })
@@ -54,8 +62,8 @@ function onUpdate(u: UpdateState & { manual: boolean }): void {
     return
   }
   if (!u.manual) return
-  if (u.state === 'none') toast({ kind: 'success', title: 'SuperGit is up to date', message: `You have the latest version (${u.version}).` }, 4000)
-  else if (u.state === 'downloading') toast({ kind: 'info', title: `Downloading SuperGit ${u.version}`, message: 'You will be asked to restart once it is ready.' }, 4000)
+  if (u.state === 'none') toast({ kind: 'success', title: 'SuperGit is up to date', message: `You have the latest version (${u.version}).` })
+  else if (u.state === 'downloading') toast({ kind: 'info', title: `Downloading SuperGit ${u.version}`, message: 'You will be asked to restart once it is ready.' })
   else if (u.state === 'error') toast({ kind: 'error', title: 'Could not check for updates', message: u.message })
   else if (u.state === 'unsupported') toast({ kind: 'info', title: 'Automatic updates are not available', message: u.reason }, 6000)
 }
@@ -83,7 +91,7 @@ export async function activateTab(id: string): Promise<void> {
   setState({ activeTab: id })
   persistTabs()
   const tab = getState().tabs.find((t) => t.id === id)
-  if (!tab) { await watchOnly(null); return }
+  if (!tab || isNewTab(tab)) { await watchOnly(null); return }
   const s = getState()
   if (!s.repos[tab.path]) {
     setState({ repos: { ...s.repos, [tab.path]: newRepoView(tab.path, s.settings?.showAllCommits ? 1_000_000 : s.settings?.commitLimit ?? 2000) } })
@@ -92,19 +100,84 @@ export async function activateTab(id: string): Promise<void> {
   await refresh(tab.path)
 }
 
-export async function openRepo(p: string): Promise<void> {
+/** opens (or shows) the repository at `p`; resolves to its root path as the tab knows it */
+export async function openRepo(p: string): Promise<string | undefined> {
   const info = await api.resolveRepo(p)
   if (!info) {
     toast({ kind: 'error', title: 'Not a git repository', message: p })
     return
   }
   const root = info.root
-  const existing = getState().tabs.find((t) => t.path.toLowerCase() === root.toLowerCase())
-  if (existing) { await activateTab(existing.id); return }
+  const existing = getState().tabs.find((t) => t.path && t.path.toLowerCase() === root.toLowerCase())
+  if (existing) {
+    // from a "New Tab": the blank tab goes away once the open repository is shown
+    const blankTab = getState().tabs.find((t) => t.id === getState().activeTab && isNewTab(t))
+    await activateTab(existing.id)
+    if (blankTab) await closeTab(blankTab.id)
+    return existing.path
+  }
   const tab: TabInfo = { id: crypto.randomUUID(), path: root, name: basename(root) }
-  setState((s) => ({ tabs: [...s.tabs, tab] }))
+  // opened from a "New Tab": the repository takes that tab's place (like the original)
+  const blank = getState().tabs.find((t) => t.id === getState().activeTab && isNewTab(t))
+  setState((s) => ({ tabs: blank ? s.tabs.map((t) => (t.id === blank.id ? tab : t)) : [...s.tabs, tab] }))
   await api.addRecent(root, tab.name)
   setState((s) => ({ settings: s.settings ? { ...s.settings, recent: [{ path: root, name: tab.name, lastOpened: Date.now() }, ...s.settings.recent.filter((r) => r.path.toLowerCase() !== root.toLowerCase())] } : s.settings }))
+  await activateTab(tab.id)
+  await afterRepoOpened(root, tab.name)
+  return root
+}
+
+/** the original's checks once a repository is open: a repository without commits, one stored in WSL */
+async function afterRepoOpened(root: string, name: string): Promise<void> {
+  if (await api.repoIsEmpty(root).catch(() => false)) {
+    showPrompt({
+      kind: 'confirm',
+      message: `Repository '${name}' must have an initial commit to be opened. Do you want SuperGit to make a commit for you?`,
+      buttons: [{ label: 'Initialize', style: 'success', run: () => run(root, () => api.makeInitialCommit(root), { errorTitle: 'Failed to create the initial commit' }) }]
+    })
+  }
+  if (/^[\\/]{2}wsl(\$|\.localhost)[\\/]/i.test(root)) {
+    toast({
+      kind: 'info',
+      title: 'Working with repositories stored on WSL is not recommended from SuperGit on Windows. Visit the Help Center for the best experience with files across the WSL boundary.',
+      // stays until closed, like the original's (the original's page is about GitKraken itself, so this points at Microsoft's)
+      actions: [{ label: 'Open Help Center', run: () => void api.openExternal('https://learn.microsoft.com/windows/wsl/filesystems') }]
+    }, 0)
+  }
+  // like the original: submodules that were never initialized are offered once the repository loads
+  void loadedSnapshot(root).then((snap) => {
+    if (!snap?.submodules.some((s) => s.state === '-')) return
+    showPrompt({
+      kind: 'confirm',
+      message: `Would you like to initialize submodules for ${name}?`,
+      buttons: [
+        { label: 'Yes', style: 'success', run: () => run(root, () => api.submoduleUpdate(root), { busy: 'Updating submodules', success: 'Submodules updated' }) }
+      ],
+      cancelLabel: 'No'
+    })
+  })
+}
+
+/** the repository's first snapshot (undefined if it does not arrive within 15 s or the tab goes away) */
+function loadedSnapshot(path: string): Promise<RepoSnapshot | undefined> {
+  const now = getState().repos[path]?.snapshot
+  if (now) return Promise.resolve(now)
+  return new Promise((resolve) => {
+    const done = (v: RepoSnapshot | undefined) => { window.clearTimeout(t); unsub(); resolve(v) }
+    const unsub = useStore.subscribe((s) => {
+      const r = s.repos[path]
+      if (!r) done(undefined)
+      else if (r.snapshot) done(r.snapshot)
+    })
+    const t = window.setTimeout(() => done(undefined), 15000)
+  })
+}
+
+/** a "New Tab" (Ctrl+T / "+"): a tab without a repository */
+export const isNewTab = (t: TabInfo): boolean => !t.path
+export async function newTab(): Promise<void> {
+  const tab: TabInfo = { id: crypto.randomUUID(), path: '', name: 'New Tab' }
+  setState((s) => ({ tabs: [...s.tabs, tab] }))
   await activateTab(tab.id)
 }
 
@@ -120,7 +193,7 @@ export async function closeTab(id: string): Promise<void> {
   const idx = s.tabs.findIndex((t) => t.id === id)
   if (idx < 0) return
   const tab = s.tabs[idx]
-  closedTabs.push(tab)
+  if (!isNewTab(tab)) closedTabs.push(tab)
   const tabs = s.tabs.filter((t) => t.id !== id)
   const repos = { ...s.repos }
   if (!tabs.some((t) => t.path === tab.path)) delete repos[tab.path]
@@ -143,6 +216,24 @@ export function reorderTabs(from: number, to: number): void {
 
 const inflight = new Map<string, Promise<void>>()
 const pending = new Set<string>()
+
+/** the app's own git operations running per repository, and repositories the watcher reported changes for meanwhile */
+const opsInFlight = new Map<string, number>()
+const changedDuringOp = new Set<string>()
+/** runs one of the app's own operations; changes reported meanwhile are refreshed after it (unless the caller refreshes anyway) */
+export async function asOwnOp<T>(path: string, fn: () => Promise<T>, callerRefreshes: boolean): Promise<T> {
+  opsInFlight.set(path, (opsInFlight.get(path) ?? 0) + 1)
+  try {
+    return await fn()
+  } finally {
+    const n = (opsInFlight.get(path) ?? 1) - 1
+    if (n > 0) opsInFlight.set(path, n)
+    else {
+      opsInFlight.delete(path)
+      if (changedDuringOp.delete(path) && !callerRefreshes) void refresh(path)
+    }
+  }
+}
 
 export function refresh(path: string): Promise<void> {
   if (inflight.has(path)) { pending.add(path); return inflight.get(path)! }
@@ -197,16 +288,36 @@ async function doRefresh(path: string): Promise<void> {
   const v = getState().repos[path]
   if (!v) return
   try {
-    const [snap, undo] = await Promise.all([api.snapshot(path, v.limit), api.undoState(path)])
+    const t0 = performance.now()
+    const [full, undo] = await Promise.all([api.snapshot(path, v.limit), api.undoState(path)])
+    // a staging operation that wrote the working status after this snapshot started is newer: keep it
+    const snap = statusNewerThan(path, t0) && v.snapshot ? { ...full, status: getState().repos[path]?.snapshot?.status ?? full.status } : full
     updateRepo(path, (r) => ({
       snapshot: snap, loading: false, error: undefined, undo,
       selection: fixSelection(r.selection, snap),
       center: fixCenter(r.center, snap),
-      wip: r.wip.summary || !snap.status.state.message || snap.status.state.kind === 'none' ? r.wip : messageToWip(snap.status.state.message, r.wip.amend)
+      wip: opWip(path, r.wip, snap.status.state)
     }))
   } catch (e) {
     updateRepo(path, { loading: false, error: errMsg(e) })
   }
+}
+
+/** the operation message last put in each repository's commit box, to tell it apart from what the user typed */
+const prefilledMsg = new Map<string, string>()
+function opWip<W extends { summary: string; description: string; amend: boolean }>(path: string, wip: W, state: { kind: string; message?: string }): W {
+  const pre = prefilledMsg.get(path)
+  const untouched = pre !== undefined && `${wip.summary}\n${wip.description}` === pre
+  if (state.kind === 'none' || !state.message) {
+    // the operation ended outside the app: its message goes too, unless the user edited it
+    if (state.kind === 'none' && pre !== undefined) { prefilledMsg.delete(path); if (untouched) return { ...wip, summary: '', description: '' } }
+    return wip
+  }
+  const next = messageToWip(state.message, wip.amend)
+  const key = `${next.summary}\n${next.description}`
+  if (wip.summary && !(untouched && key !== pre)) return wip
+  prefilledMsg.set(path, key)
+  return { ...wip, ...next }
 }
 
 function messageToWip(msg: string, amend: boolean) {
@@ -223,36 +334,40 @@ export async function loadMore(path: string): Promise<void> {
 // ---------------------------------------------------------------------------------------------
 // generic runners
 
-interface RunOpts { busy?: string; success?: string; successMessage?: string; errorTitle?: string; refresh?: boolean }
+interface RunOpts<T = unknown> { busy?: string; success?: string; successMessage?: string; errorTitle?: string; refresh?: boolean; /** runs as soon as the call returns, before the graph refreshes (the original shows results at once) */ after?: (r: T) => void }
 
-export async function run<T>(path: string, fn: () => Promise<T>, opts: RunOpts = {}): Promise<T | undefined> {
+export async function run<T>(path: string, fn: () => Promise<T>, opts: RunOpts<T> = {}): Promise<T | undefined> {
   if (opts.busy) updateRepo(path, { busy: opts.busy })
   try {
-    const r = await fn()
-    if (opts.success) toast({ kind: 'success', title: opts.success, message: opts.successMessage }, 4000)
+    const r = await asOwnOp(path, fn, opts.refresh !== false)
+    if (opts.success) toast({ kind: 'success', title: opts.success, message: opts.successMessage })
+    opts.after?.(r)
     return r
   } catch (e) {
     toast({ kind: 'error', title: opts.errorTitle ?? 'Something went wrong', message: errMsg(e) })
     return undefined
   } finally {
-    if (opts.busy) updateRepo(path, { busy: null })
     setState({ progress: null })
+    // the toolbar stays disabled until the graph shows the result (Stash turns off at once on a clean tree)
     if (opts.refresh !== false) await refresh(path)
+    if (opts.busy) updateRepo(path, { busy: null })
   }
 }
 
-export async function runOp(path: string, fn: () => Promise<OpResult>, what: string, busy?: string, success?: { title: string; message?: string }): Promise<OpResult | undefined> {
-  const res = await run(path, fn, { busy })
-  if (!res) return res
-  if (res.conflicts) {
-    toast({ kind: 'error', title: `${what} Failed`, message: 'There are merge conflicts that need to be resolved' }, 8000)
-    updateRepo(path, { selection: { kind: 'wip' } })
-  } else if (!res.ok) {
-    toast({ kind: 'error', title: `${what} Failed`, message: res.error })
-  } else if (success) {
-    toast({ kind: 'success', ...success }, 4000)
-  }
-  autoStashNotice(res.autoStash)
+export async function runOp(path: string, fn: () => Promise<OpResult>, what: string, busy?: string, success?: { title: string; message?: string; ttl?: number }, onOk?: (res: OpResult) => void): Promise<OpResult | undefined> {
+  const res = await run(path, fn, {
+    busy,
+    after: (res) => {
+      if (res.conflicts) {
+        toast({ kind: 'error', title: `${what} Failed`, message: 'There are merge conflicts that need to be resolved' }, 8000)
+        updateRepo(path, { selection: { kind: 'wip' } })
+      } else if (!res.ok) {
+        toast({ kind: 'error', title: `${what} Failed`, message: res.error })
+      } else if (onOk) onOk(res)
+      else if (success) toast({ kind: 'success', title: success.title, message: success.message }, success.ttl)
+      autoStashNotice(res.autoStash)
+    }
+  })
   return res
 }
 
@@ -261,7 +376,7 @@ export function autoStashNotice(a: AutoStash | undefined): void {
   if (a === 'kept') toast({ kind: 'info', title: 'Uncommitted Changes Stashed', message: 'There were uncommitted changes that have been stashed to prevent losing them.' }, 8000)
 }
 
-const ok = (title: string, message?: string) => toast({ kind: 'success', title, message }, 4000)
+const ok = (title: string, message?: string, ttl?: number) => toast({ kind: 'success', title, message }, ttl)
 
 /** the original's confirmation bar for destructive actions */
 function confirmDestructive(message: string, label: string, act: () => unknown): void {
@@ -286,14 +401,20 @@ export function selectCommit(path: string, sha: string, mod: { ctrl?: boolean; s
       return { selection: shas.length ? { kind: 'commits', shas, anchor: sha } : null, fileSel: [] }
     }
     if (mod.shift && sel?.kind === 'commits' && order) {
-      // like the original, Shift-click adds to the selection: the rows from the nearest selected commit to the clicked one
+      // like the original, Shift-click adds to the selection: the commits topologically between the nearest
+      // selected commit and the clicked one (ancestors of the newer that descend from the older)
       const b = order.indexOf(sha)
       const picked = sel.shas.map((x) => order.indexOf(x)).filter((i) => i >= 0)
       if (b >= 0 && picked.length) {
         const a = picked.reduce((best, i) => (Math.abs(i - b) < Math.abs(best - b) ? i : best), picked[0])
-        const [lo, hi] = a < b ? [a, b] : [b, a]
-        const shas = [...sel.shas, ...order.slice(lo, hi + 1).filter((x) => x !== '__wip__' && !sel.shas.includes(x))]
-        return { selection: { kind: 'commits', shas, anchor: sel.anchor }, fileSel: [] }
+        const parents = new Map<string, string[]>()
+        r.snapshot?.commits.forEach((c) => parents.set(c.sha, c.parents))
+        r.snapshot?.stashes.forEach((st) => parents.set(st.sha, st.parents.slice(0, 1)))
+        const rows = order.filter((k) => k !== '__wip__').map((k) => ({ sha: k, parents: parents.get(k) ?? [] }))
+        const range = topoRange(rows, order[a], sha)
+        const shas = [...sel.shas, ...range.filter((x) => !sel.shas.includes(x))]
+        // the clicked commit becomes the focused one (keyboard, ghost label)
+        return { selection: { kind: 'commits', shas, anchor: sha }, fileSel: [] }
       }
     }
     return { selection: { kind: 'commits', shas: [sha], anchor: sha }, fileSel: [] }
@@ -301,16 +422,17 @@ export function selectCommit(path: string, sha: string, mod: { ctrl?: boolean; s
 }
 
 export function openFile(path: string, ctx: FileContext): void { updateRepo(path, { center: { kind: 'file', ctx } }) }
-export function openMerge(path: string, file: string): void { updateRepo(path, { center: { kind: 'merge', file } }) }
+export function openMerge(path: string, file: string): void { void openMergeOrPrompt(path, file) }
 export function closeCenter(path: string): void { updateRepo(path, { center: { kind: 'graph' } }) }
 
 // ---------------------------------------------------------------------------------------------
 // staging & commit
 
-export const stageFiles = (path: string, files: FileChange[]) => run(path, () => api.stage(path, files.flatMap((f) => (f.oldPath && f.status === 'R' ? [f.path, f.oldPath] : [f.path]))))
-export const unstageFiles = (path: string, files: FileChange[]) => run(path, () => api.unstage(path, files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path]))))
-export const stageAll = (path: string) => run(path, () => api.stageAll(path))
-export const unstageAll = (path: string) => run(path, () => api.unstageAll(path))
+// fast path (see staging.ts): rows move at once, then only `git status` is read before the background refresh
+export const stageFiles = (path: string, files: FileChange[]) => runStaging(path, () => api.stage(path, files.flatMap((f) => (f.oldPath && f.status === 'R' ? [f.path, f.oldPath] : [f.path]))), (st) => W.stageOptimistic(st, files))
+export const unstageFiles = (path: string, files: FileChange[]) => runStaging(path, () => api.unstage(path, files.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path]))), (st) => W.unstageOptimistic(st, files))
+export const stageAll = (path: string) => runStaging(path, () => api.stageAll(path), W.stageAllOptimistic)
+export const unstageAll = (path: string) => runStaging(path, () => api.unstageAll(path), W.unstageAllOptimistic)
 
 export async function discardFiles(path: string, files: FileChange[]): Promise<void> {
   // the original asks in the inline prompt bar, not in a system dialog
@@ -319,7 +441,7 @@ export async function discardFiles(path: string, files: FileChange[]): Promise<v
     message: files.length === 1
       ? `This will permanently discard unstaged changes to "${files[0].path}". Are you sure you want to continue?`
       : 'This will permanently discard unstaged changes to the selected files. Are you sure you want to continue?',
-    buttons: [{ label: 'Discard Unstaged Changes', style: 'danger', run: () => run(path, () => api.discardFiles(path, files)) }]
+    buttons: [{ label: 'Discard Unstaged Changes', style: 'danger', run: () => runStaging(path, () => api.discardFiles(path, files), (st) => W.discardOptimistic(st, files)) }]
   })
 }
 
@@ -346,17 +468,41 @@ export async function commit(path: string, opts: { noVerify?: boolean; sign?: bo
   const message = description.trim() ? `${summary.trim()}\n\n${description.trim()}` : summary.trim()
   const state = v.snapshot!.status.state
   if (state.kind !== 'none') {
-    await runOp(path, () => api.continueOp(path, state.kind, message), state.kind === 'merge' ? 'Merge' : 'Continue')
+    await runOp(path, () => api.continueOp(path, state.kind, message), state.kind === 'merge' ? 'Merge' : 'Continue', undefined, state.kind === 'merge' ? { title: 'Merged Successfully' } : undefined)
     updateRepo(path, { wip: { summary: '', description: '', amend: false } })
     return
   }
   const set = getState().settings!
-  const ok = await run(path, async () => { await api.commit(path, message, amend, { noVerify: opts.noVerify, sign: opts.sign, keepComments: !set.stripComments }); return true }, { errorTitle: 'Commit failed' })
+  const ok = await run(path, async () => {
+    try { await api.commit(path, message, amend, { noVerify: opts.noVerify, sign: opts.sign, keepComments: !set.stripComments }); return true } catch (e) {
+      if (!hookFailed(e)) throw e
+      return false
+    }
+  }, { errorTitle: 'Commit failed' })
   if (ok) {
-    updateRepo(path, { wip: { summary: '', description: '', amend: false } })
+    setState({ hookFailure: null })
+    // like the original: after an amend, the message typed before ticking "Amend" comes back
+    const d = amend ? repoView(path).wip.draft : undefined
+    updateRepo(path, { wip: { summary: d?.summary ?? '', description: d?.description ?? '', amend: false } })
     // "Push after committing" (the commit options checkbox, defaulting to the preference)
     if ((opts.push ?? set.pushAfterCommit) && !amend) await push(path)
   }
+}
+
+/**
+ * A failing commit hook: the toast says "<hook> Failed Git Hook exited with <code>" (not the raw output) and a red bar
+ * offers the hook output under "View Log". Returns false when the error is something else.
+ */
+function hookFailed(e: unknown): boolean {
+  const msg = errMsg(e)
+  const at = msg.indexOf('SUPERGIT_HOOK_FAILED:')
+  if (at < 0) return false
+  let info: { hooks: Array<{ name: string; code: number }>; log: string }
+  try { info = JSON.parse(msg.slice(at + 'SUPERGIT_HOOK_FAILED:'.length)) } catch { return false }
+  const text = info.hooks.length === 1 ? `${info.hooks[0].name} Failed Git Hook exited with ${info.hooks[0].code}` : 'Multiple Git Hooks have failed'
+  toast({ kind: 'error', title: 'Commit failed', message: info.hooks.length === 1 ? text : info.hooks.map((h) => `${h.name} Failed Git Hook exited with ${h.code}`).join('\n') })
+  setState({ hookFailure: { title: text, log: info.log } })
+  return true
 }
 
 export async function setAmend(path: string, amend: boolean): Promise<void> {
@@ -380,16 +526,15 @@ export const takeSide = (path: string, file: string, side: 'ours' | 'theirs') =>
 export async function abortOp(path: string): Promise<void> {
   const kind = snap(path).status.state.kind
   if (kind === 'none') return
-  const r = await api.confirm({ title: `Abort ${kind}`, message: `Abort the ${kind} in progress?`, detail: 'Your working directory will be restored to the state before the operation started.', buttons: [`Abort ${kind}`, 'Cancel'], type: 'warning' })
-  if (r !== 0) return
-  await runOp(path, () => api.abortOp(path, kind), 'Abort')
+  // like the original: aborts right away, no confirmation ("Abort Merge Failed" / "Abort Rebase Failed" on errors)
+  await runOp(path, () => api.abortOp(path, kind), kind === 'rebase' ? 'Abort Rebase' : 'Abort Merge')
   updateRepo(path, { wip: { summary: '', description: '', amend: false } })
 }
 export async function continueOp(path: string): Promise<void> {
   const v = repoView(path)
   const kind = v.snapshot!.status.state.kind
   const msg = v.wip.summary.trim() ? [v.wip.summary.trim(), v.wip.description.trim()].filter(Boolean).join('\n\n') : undefined
-  await runOp(path, () => api.continueOp(path, kind, msg), 'Continue')
+  await runOp(path, () => api.continueOp(path, kind, msg), 'Continue', undefined, kind === 'merge' ? { title: 'Merged Successfully' } : undefined)
   updateRepo(path, { wip: { summary: '', description: '', amend: false } })
 }
 export const skipOp = (path: string) => runOp(path, () => api.skipOp(path, snap(path).status.state.kind), 'Skip')
@@ -407,6 +552,17 @@ export async function checkoutRef(path: string, ref: Ref): Promise<void> {
   if (ref.type === 'remote') {
     // like the original: a local branch of that name at another commit asks what to do
     const local = localForRemote(path, ref.short)
+    // the local branch is checked out in another worktree: do it there
+    const wt = local ? snap(path).worktrees.find((w) => !w.isCurrent && w.branch?.replace(/^refs\/heads\//, '') === local.short) : undefined
+    if (local && wt) {
+      const inWt = async (fn: (at: string) => Promise<unknown>, target: string) => { const at = await openRepo(wt.path); if (at) await doCheckout(at, target, () => fn(at)) }
+      showPrompt({
+        kind: 'input', message: `A local '${local.short}' already exists in a worktree.`, placeholder: 'branch name', submitLabel: 'Open Worktree and create Branch Here', large: false, requireValue: true,
+        extraButtons: [{ label: 'Open Worktree and reset Local to Here', run: () => inWt((at) => api.checkoutRemote(at, ref.short, true, { reset: true }), local.short) }],
+        onSubmit: (name) => inWt((at) => api.checkoutRemote(at, ref.short, false, { newName: name.trim() }), name.trim())
+      })
+      return
+    }
     if (local && local.sha !== ref.sha) {
       showPrompt({
         kind: 'input', message: `A local '${local.short}' already exists.`, placeholder: 'branch name', submitLabel: 'Create Branch Here', large: false, requireValue: true,
@@ -425,13 +581,13 @@ export async function checkoutRef(path: string, ref: Ref): Promise<void> {
 async function doCheckout(path: string, target: string, fn: () => Promise<unknown>, tag?: string): Promise<void> {
   updateRepo(path, { busy: CHECKING_OUT })
   try {
-    const r = await fn()
+    const r = await asOwnOp(path, fn, true)
     await refresh(path)
     const branch = snap(path)?.head.branch
     ok('Checkout Successful', tag ? `Checked out the commit referenced by ${tag}` : branch ? `refs/heads/${branch}` : snap(path)?.head.sha ?? target)
     if (r === 'kept') autoStashNotice('kept')
   } catch (e) {
-    toast({ kind: 'error', title: `Could not checkout ${target}`, message: errMsg(e) })
+    toast({ kind: 'error', title: 'Checkout Failed', message: errMsg(e) })
     await refresh(path)
   } finally {
     if (repoView(path)?.busy === CHECKING_OUT) updateRepo(path, { busy: null })
@@ -448,6 +604,8 @@ export function startCreateRef(path: string, kind: 'branch' | 'tag' | 'annotated
   const s = snap(path)
   const at = sha ?? (repoView(path).selection?.kind === 'commits' ? (repoView(path).selection as { anchor: string }).anchor : s.head.sha)
   if (!at) { toast({ kind: 'error', title: 'Nothing to branch from', message: 'This repository has no commits yet.' }); return }
+  // like the original: without the branch column (or when the commit is not in the graph) a prompt in the toolbar asks instead
+  if (!getState().settings?.graphColumns.ref || !s.commits.some((c) => c.sha === at)) { promptCreateRef(path, kind, at); return }
   updateRepo(path, { newRef: { kind, sha: at } })
 }
 
@@ -456,7 +614,7 @@ export async function submitNewRef(path: string, name: string): Promise<void> {
   updateRepo(path, { newRef: null })
   const n = name.trim()
   if (!nr || !n) return
-  if (nr.kind === 'branch') await run(path, () => api.createBranch(path, n, nr.sha, true), { errorTitle: 'Could not create branch', success: 'Checkout Successful', successMessage: `refs/heads/${n}` })
+  if (nr.kind === 'branch') await run(path, () => api.createBranch(path, n, nr.sha, true), { busy: CHECKING_OUT, errorTitle: 'Could not create branch', success: 'Checkout Successful', successMessage: `refs/heads/${n}` })
   else if (nr.kind === 'annotated-tag') {
     showPrompt({
       kind: 'input', message: 'Message:', placeholder: 'Annotation message',
@@ -466,8 +624,13 @@ export async function submitNewRef(path: string, name: string): Promise<void> {
 }
 
 export async function deleteLocalBranch(path: string, ref: Ref): Promise<void> {
-  // like the original: always confirms (merged or not), then deletes (Undo restores it)
-  confirmDestructive(`This is a destructive operation, are you sure you want to delete "${ref.short}"?`, 'Delete', () =>
+  // like the original: always confirms (merged or not, no extra warning for unmerged work), then force-deletes
+  // (Undo restores it); Gitflow's main and develop branches get their own warning
+  const gf = snap(path).gitflow
+  const gitflowBranch = gf?.initialized && (ref.short === gf.master || ref.short === gf.develop)
+  confirmDestructive(gitflowBranch
+    ? `This branch is required for Gitflow, are you sure you want to delete "${ref.short}"?`
+    : `This is a destructive operation, are you sure you want to delete "${ref.short}"?`, 'Delete', () =>
     run(path, () => api.deleteBranch(path, ref.short, true), { busy: DELETING, errorTitle: `Delete Failed: refs/heads/${ref.short}`, success: `Deleted: refs/heads/${ref.short}` }))
 }
 
@@ -527,10 +690,14 @@ export function orderOldestFirst(path: string, shas: string[]): string[] {
 function askCommitNow(message: string, go: (noCommit: boolean) => unknown): void {
   showPrompt({ kind: 'confirm', message, buttons: [{ label: 'Yes', style: 'success', run: () => go(false) }, { label: 'No', run: () => go(true) }] })
 }
+/** result toast of cherry pick / revert / patch; says so when the branch already had every change */
+export const noopAware = (title: string, what: string) => (res: OpResult): void => {
+  toast({ kind: 'success', title, message: res.noop ? `However, the current branch already has all changes from the ${what}.` : undefined }, res.noop ? TOAST_SHORT : undefined)
+}
 export const cherryPick = (path: string, shas: string[]) => askCommitNow('Do you want to immediately commit the cherry picked changes?', (noCommit) =>
-  runOp(path, () => api.cherryPick(path, orderOldestFirst(path, shas), noCommit), 'Cherry pick', 'Cherry picking', { title: 'Cherry pick Successful' }))
+  runOp(path, () => api.cherryPick(path, orderOldestFirst(path, shas), noCommit), 'Cherry pick', 'Cherry picking', undefined, noopAware('Cherry pick Successful', 'cherry picked commit')))
 export const revertCommit = (path: string, c: Commit) => askCommitNow('Do you want to immediately commit the reverted changes?', (noCommit) =>
-  runOp(path, () => api.revert(path, c.sha, c.parents.length > 1, noCommit), 'Revert', 'Reverting', { title: 'Revert Successful' }))
+  runOp(path, () => api.revert(path, c.sha, c.parents.length > 1, noCommit), 'Revert', 'Reverting', undefined, noopAware('Revert Successful', 'reverted commit')))
 
 export async function resetTo(path: string, sha: string, mode: ResetMode): Promise<void> {
   const go = () => runOp(path, () => api.reset(path, sha, mode), 'Reset')
@@ -766,10 +933,14 @@ export async function removeWorktree(path: string, wt: Worktree, deleteBranch = 
 // ---------------------------------------------------------------------------------------------
 // network
 
+const autoFetchFailed = new Set<string>()
 export async function fetchAll(path: string, quiet = false): Promise<void> {
   forgetRemoteTags(path)
   if (quiet) {
-    try { await api.fetchAll(path, true) } catch { /* silent */ }
+    try { await api.fetchAll(path, true); autoFetchFailed.delete(path) } catch {
+      // like the original: say so once per streak of failures
+      if (!autoFetchFailed.has(path)) { autoFetchFailed.add(path); toast({ kind: 'error', title: 'Autofetch failed. Fetch manually for more information.' }, TOAST_SHORT) }
+    }
     await refresh(path)
     void remoteTagsOf(path) // ready for the tag menu
     return
@@ -785,11 +956,15 @@ export async function pull(path: string, mode?: PullMode): Promise<void> {
   if (s.head.detached) { toast({ kind: 'error', title: 'Pull is not available when in a detached HEAD state' }); return }
   const local = s.refs.find((r) => r.type === 'head' && r.isCurrent)
   if (!local?.upstream) { toast({ kind: 'error', title: 'No upstream', message: `${s.head.branch} does not track a remote branch. Push it first or set an upstream.` }); return }
-  const res = await runOp(path, () => api.pull(path, m), 'Pull', 'Pulling')
-  if (!res?.ok || res.conflicts) return
-  // like the original: say so when there was nothing to bring in, then confirm the pull
-  if (res.upToDate) toast({ kind: 'info', title: 'Already Up-to-Date', message: `No merge necessary. Branch ${local.upstream.replace(/^refs\/remotes\//, '')} was not moved.` }, 5000)
-  ok('Pulled Successfully')
+  const upstream = local.upstream.replace(/^refs\/remotes\//, '')
+  // like the original: confirm the pull at once, and say so when there was nothing to bring in
+  const res = await runOp(path, () => api.pull(path, m), 'Pull', 'Pulling', undefined, (res) => {
+    ok('Pulled Successfully', undefined, TOAST_SHORT)
+    if (res.upToDate) toast({ kind: 'info', title: 'Already Up-to-Date', message: `No merge necessary. Branch ${upstream} was not moved.` }, TOAST_SHORT)
+  })
+  // like the original: the commit the pull moved HEAD to ends up selected (its details open)
+  const head = repoView(path)?.snapshot?.head.sha
+  if (res?.ok && !res.conflicts && !res.upToDate && head) updateRepo(path, { selection: { kind: 'commits', shas: [head], anchor: head }, fileSel: [], focus: { sha: head, t: Date.now() } })
 }
 
 export function remoteOf(path: string, fullRemoteRef: string): { remote: string; branch: string } {
@@ -816,32 +991,34 @@ export async function push(path: string, branchName?: string, force = false): Pr
 
 type PushOpts = { remote: string; branch: string; remoteBranch?: string; setUpstream?: boolean; force?: boolean; noLease?: boolean }
 export async function doPush(path: string, opts: PushOpts): Promise<void> {
-  const res = await run(path, () => api.push(path, opts), { busy: 'Pushing' })
-  if (!res) return
-  if (res.ok) { ok('Pushed Successfully', `${opts.branch} to ${opts.remote}`); return }
-  // the remote branch moved since the last fetch (rejected while not known to be behind, or the lease failed)
-  const remoteChanged = () =>
-    showPrompt({
-      kind: 'confirm', message: `WARNING! 'refs/heads/${opts.branch}' has changed on the remote since the last fetch.`,
-      buttons: [
-        { label: 'Fetch', style: 'success', run: () => fetchAll(path) },
-        { label: 'Force Push Anyway', style: 'danger', run: () => showPrompt({ kind: 'confirm', message: 'Force push is a destructive action and cannot be undone. Are you sure?', buttons: [{ label: 'Force Push', style: 'danger', run: () => doPush(path, { ...opts, force: true, noLease: true }) }] }) }
-      ]
-    })
-  if (res.error === 'stale') { remoteChanged(); return }
-  if (res.error === 'rejected' && !opts.force) {
-    // like the original: "behind" only when the branch is known to be behind its upstream
-    if (!snap(path).refs.find((r) => r.type === 'head' && r.short === opts.branch)?.behind) { remoteChanged(); return }
-    showPrompt({
-      kind: 'confirm', message: `'refs/heads/${opts.branch}' is behind 'refs/remotes/${opts.remote}/${opts.remoteBranch ?? opts.branch}'. Update your branch by doing a Pull.`,
-      buttons: [
-        { label: getState().settings?.defaultPullMode === 'ff-only' ? 'Pull (fast-forward only)' : getState().settings?.defaultPullMode === 'rebase' ? 'Pull (rebase)' : 'Pull (fast-forward if possible)', style: 'success', run: () => pull(path) },
-        { label: 'Force Push', style: 'danger', run: () => confirmForcePush(path, opts) }
-      ]
-    })
-    return
+  // the result (toast or prompt) shows as soon as the push ends, before the graph refreshes
+  const report = (res: OpResult): void => {
+    if (res.ok) { ok('Pushed Successfully', `${opts.branch} to ${opts.remote}`); return }
+    // the remote branch moved since the last fetch (rejected while not known to be behind, or the lease failed)
+    const remoteChanged = () =>
+      showPrompt({
+        kind: 'confirm', message: `WARNING! 'refs/heads/${opts.branch}' has changed on the remote since the last fetch.`,
+        buttons: [
+          { label: 'Fetch', style: 'success', run: () => fetchAll(path) },
+          { label: 'Force Push Anyway', style: 'danger', run: () => showPrompt({ kind: 'confirm', message: 'Force push is a destructive action and cannot be undone. Are you sure?', buttons: [{ label: 'Force Push', style: 'danger', run: () => doPush(path, { ...opts, force: true, noLease: true }) }] }) }
+        ]
+      })
+    if (res.error === 'stale') { remoteChanged(); return }
+    if (res.error === 'rejected' && !opts.force) {
+      // like the original: "behind" only when the branch is known to be behind its upstream
+      if (!snap(path).refs.find((r) => r.type === 'head' && r.short === opts.branch)?.behind) { remoteChanged(); return }
+      showPrompt({
+        kind: 'confirm', message: `'refs/heads/${opts.branch}' is behind 'refs/remotes/${opts.remote}/${opts.remoteBranch ?? opts.branch}'. Update your branch by doing a Pull.`,
+        buttons: [
+          { label: getState().settings?.defaultPullMode === 'ff-only' ? 'Pull (fast-forward only)' : getState().settings?.defaultPullMode === 'rebase' ? 'Pull (rebase)' : 'Pull (fast-forward if possible)', style: 'success', run: () => pull(path) },
+          { label: 'Force Push', style: 'danger', run: () => confirmForcePush(path, opts) }
+        ]
+      })
+      return
+    }
+    toast({ kind: 'error', title: 'Push failed', message: res.error })
   }
-  toast({ kind: 'error', title: 'Push failed', message: res.error })
+  await run(path, () => api.push(path, opts), { busy: 'Pushing', after: report })
 }
 
 export function confirmForcePush(path: string, opts: PushOpts): void {
@@ -878,7 +1055,7 @@ async function undoOrRedo(path: string, which: 'undo' | 'redo'): Promise<void> {
   const state = (await api.undoState(path).catch(() => null))?.[which]
   const go = async (stash: boolean) => {
     const label = await run(path, () => (which === 'undo' ? api.undo(path, { stash }) : api.redo(path, { stash })), { errorTitle: which === 'undo' ? 'Undo Failed' : 'Redo Failed' })
-    if (label) ok(which === 'undo' ? 'Undo Successful' : 'Redo Successful', label)
+    if (label) ok(which === 'undo' ? 'Undo Successful' : 'Redo Successful', label, TOAST_SHORT)
   }
   if (state?.needsStash) {
     showPrompt({

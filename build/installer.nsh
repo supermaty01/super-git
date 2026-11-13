@@ -11,12 +11,36 @@
   Var sgImport
   Var sgImportOn
   Var sgHasGitKraken
+  Var sgPath
+  Var sgPathOn
 !endif
+
+; "Add supergit to PATH": the user PATH (HKCU\Environment, no admin rights) gets or loses
+; $INSTDIR\resources\bin, read and written raw so %VARIABLES% in it stay unexpanded. PowerShell
+; does the edit because NSIS strings are cut at 1024 characters, which a long PATH exceeds.
+; The folder comes in through the SG_BIN_DIR environment variable, so no quoting is involved.
+!define SG_PS '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command'
+!define SG_PATH_READ `$$d=$$env:SG_BIN_DIR; $$k=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment'); $$p=[string]$$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $$a=@($$p -split ';' | Where-Object { $$_ -and ($$_.TrimEnd('\') -ne $$d.TrimEnd('\')) });`
+!define SG_PATH_ADD `${SG_PATH_READ} $$a+=$$d; $$k.SetValue('Path',($$a -join ';'),[Microsoft.Win32.RegistryValueKind]::ExpandString); $$k.Close()`
+!define SG_PATH_REMOVE `${SG_PATH_READ} if ($$a.Count) { $$k.SetValue('Path',($$a -join ';'),[Microsoft.Win32.RegistryValueKind]::ExpandString) } else { $$k.DeleteValue('Path',$$false) }; $$k.Close()`
+
+!macro sgPathEdit SCRIPT
+  System::Call 'Kernel32::SetEnvironmentVariable(t "SG_BIN_DIR", t "$INSTDIR\resources\bin") i'
+  nsExec::Exec `${SG_PS} "${SCRIPT}"`
+  Pop $0
+  ; tell Explorer (and terminals started from it) that the environment changed: WM_SETTINGCHANGE
+  SendMessage 0xFFFF 0x001A 0 "STR:Environment" /TIMEOUT=5000
+!macroend
 
 ; defaults for the options page (silent installs and updates keep what is there)
 !macro customInit
   StrCpy $sgDesktopOn ${BST_CHECKED}
   StrCpy $sgContextOn ${BST_CHECKED}
+  ; on unless it was turned off in an earlier install (silent updates keep that choice)
+  StrCpy $sgPathOn ${BST_CHECKED}
+  ReadRegStr $0 HKCU "Software\SuperGit" "AddToPath"
+  StrCmp $0 "0" 0 +2
+    StrCpy $sgPathOn ${BST_UNCHECKED}
   StrCpy $sgHasGitKraken "0"
   IfFileExists "$APPDATA\.gitkraken\profiles\*.*" 0 +2
     StrCpy $sgHasGitKraken "1"
@@ -45,15 +69,19 @@ Function sgOptionsPage
   Pop $sgContext
   ${NSD_SetState} $sgContext $sgContextOn
 
+  ${NSD_CreateCheckbox} 0 36u 100% 12u "Add s&upergit to PATH (open a repository from a terminal with: supergit .)"
+  Pop $sgPath
+  ${NSD_SetState} $sgPath $sgPathOn
+
   ${If} $sgHasGitKraken == "1"
-    ${NSD_CreateCheckbox} 0 36u 100% 12u "&Import the repositories GitKraken has open, and its matching preferences"
+    ${NSD_CreateCheckbox} 0 54u 100% 12u "&Import the repositories GitKraken has open, and its matching preferences"
     Pop $sgImport
     ${NSD_SetState} $sgImport $sgImportOn
-    ${NSD_CreateLabel} 12u 50u 95% 24u "Read only: GitKraken's files are not changed. Hidden branches and stashes, theme, zoom, diff view and fonts come along."
+    ${NSD_CreateLabel} 12u 68u 95% 24u "Read only: GitKraken's files are not changed. Hidden branches and stashes, theme, zoom, diff view and fonts come along."
     Pop $0
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 90u 100% 24u "A Start menu shortcut is always created. To keep SuperGit on the taskbar, right-click it there after it starts and choose Pin to taskbar."
+  ${NSD_CreateLabel} 0 104u 100% 24u "A Start menu shortcut is always created. To keep SuperGit on the taskbar, right-click it there after it starts and choose Pin to taskbar."
   Pop $0
   nsDialogs::Show
 FunctionEnd
@@ -61,6 +89,7 @@ FunctionEnd
 Function sgOptionsLeave
   ${NSD_GetState} $sgDesktop $sgDesktopOn
   ${NSD_GetState} $sgContext $sgContextOn
+  ${NSD_GetState} $sgPath $sgPathOn
   ${If} $sgHasGitKraken == "1"
     ${NSD_GetState} $sgImport $sgImportOn
   ${EndIf}
@@ -98,6 +127,22 @@ FunctionEnd
   ${EndIf}
   sgOptionsDone:
 
+  ; the supergit command (resourcesin\supergit.cmd, and supergit for Git Bash) on the user PATH.
+  ; Silent installs (automatic updates) apply the remembered choice, on by default.
+  ${If} $sgPathOn == ${BST_CHECKED}
+    !insertmacro sgPathEdit `${SG_PATH_ADD}`
+    WriteRegStr HKCU "Software\SuperGit" "AddToPath" "1"
+  ${Else}
+    !insertmacro sgPathEdit `${SG_PATH_REMOVE}`
+    WriteRegStr HKCU "Software\SuperGit" "AddToPath" "0"
+  ${EndIf}
+
+  ; supergit:// links (supergit://repo/<path>, supergit://repolink/...) open SuperGit
+  WriteRegStr HKCU "Software\Classes\supergit" "" "URL:SuperGit"
+  WriteRegStr HKCU "Software\Classes\supergit" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\supergit\DefaultIcon" "" "$INSTDIR\SuperGit.exe,0"
+  WriteRegStr HKCU "Software\Classes\supergit\shell\open\command" "" '"$INSTDIR\SuperGit.exe" "%1"'
+
   ; SuperGit drives the git command line. If Git for Windows is missing, offer its download page
   ; (the installation of SuperGit itself continues either way; silent installs skip the question).
   IfSilent sgGitDone
@@ -123,5 +168,9 @@ FunctionEnd
     Delete "$DESKTOP\SuperGit.lnk"
     DeleteRegKey HKCU "Software\Classes\Directory\shell\SuperGit"
     DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\SuperGit"
+    DeleteRegKey HKCU "Software\Classes\supergit"
+    !insertmacro sgPathEdit `${SG_PATH_REMOVE}`
+    DeleteRegValue HKCU "Software\SuperGit" "AddToPath"
+    DeleteRegKey /ifempty HKCU "Software\SuperGit"
   ${endIf}
 !macroend

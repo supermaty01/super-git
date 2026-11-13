@@ -1,13 +1,21 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import type { RepoView } from '../store'
 import { updateRepo, getState, useStore } from '../store'
 import * as A from '../actions'
 import { fileMenu } from '../menus'
+import * as QM from '../quickMenus'
 import { Icon } from './Icon'
+import { Checkbox } from './Checkbox'
 import { FileList, FileListToolbar } from './FileList'
 import { useFileListMode } from './DetailPanel'
+import { useSortDesc } from '../fileListState'
 import type { FileChange } from '@shared/types'
+
+// the commit message panel's height (dragged at its top grip), shared by every repository like the original
+const COMMIT_PANEL_MIN = 305
+const LISTS_MIN = 218
+let commitPanelHeight = COMMIT_PANEL_MIN
 
 export function WipPanel({ repo }: { repo: RepoView }) {
   const s = repo.snapshot!
@@ -15,10 +23,11 @@ export function WipPanel({ repo }: { repo: RepoView }) {
   const st = s.status
   const state = st.state
   const [mode, setMode] = useFileListMode()
-  const [sortDesc, setSortDesc] = useState(false)
+  const [sortDesc, setSortDesc] = useSortDesc()
   const [openUn, setOpenUn] = useState(true)
   const [openSt, setOpenSt] = useState(true)
-  const [splitPct, setSplitPct] = useState(50)
+  const [boxH, setBoxH] = useState(commitPanelHeight)
+  const listsRef = useRef<HTMLDivElement>(null)
 
   const activeCtx = repo.center.kind === 'file' ? repo.center.ctx : null
   const activeUn = activeCtx?.kind === 'unstaged' ? activeCtx.path : null
@@ -30,9 +39,16 @@ export function WipPanel({ repo }: { repo: RepoView }) {
   // like the original, untracked files that have nothing to do with the merge stay out of the way while it runs
   const opUnstaged = st.unstaged.filter((f) => f.status !== '?')
 
+  // the original's selection-aware buttons: "Stage 2 Files", "Unstage 2 Files", trash + "2" ("Discard 2 files")
+  const multi = repo.fileSel.length > 1 ? new Set(repo.fileSel) : null
+  const selUn = multi ? st.unstaged.filter((f) => multi.has(f.path)) : []
+  const selSt = multi ? st.staged.filter((f) => multi.has(f.path)) : []
+  const forRow = (list: FileChange[], f: FileChange) => (multi?.has(f.path) ? list.filter((x) => multi.has(x.path)) : [f])
+
   const openUnstaged = (f: FileChange) => A.openFile(path, { kind: 'unstaged', path: f.path, status: f.status })
   const openStaged = (f: FileChange) => A.openFile(path, { kind: 'staged', path: f.path, oldPath: f.oldPath, status: f.status })
   const setSel = (paths: string[]) => updateRepo(path, { fileSel: paths })
+  const close = () => A.closeCenter(path)
 
   const unstagedList = (
     <FileList
@@ -43,9 +59,10 @@ export function WipPanel({ repo }: { repo: RepoView }) {
       selected={repo.fileSel}
       onSelect={setSel}
       onOpen={openUnstaged}
-      onDoubleClick={(f) => A.stageFiles(path, [f])}
+      onClose={close}
       onContext={(f) => fileMenu(path, f, 'unstaged')}
-      rowAction={(f) => <button className="btn btn-success btn-xs" onClick={() => A.stageFiles(path, repo.fileSel.length > 1 && repo.fileSel.includes(f.path) ? st.unstaged.filter((x) => repo.fileSel.includes(x.path)) : [f])}>Stage File</button>}
+      onDirContext={(d, fl) => QM.dirMenu(path, d, fl, 'unstaged')}
+      rowAction={(f) => <button className="btn btn-success btn-xs" onClick={() => A.stageFiles(path, forRow(st.unstaged, f))}>Stage File</button>}
     />
   )
   const stagedList = (
@@ -57,11 +74,28 @@ export function WipPanel({ repo }: { repo: RepoView }) {
       selected={repo.fileSel}
       onSelect={setSel}
       onOpen={openStaged}
-      onDoubleClick={(f) => A.unstageFiles(path, [f])}
+      onClose={close}
       onContext={(f) => fileMenu(path, f, 'staged')}
-      rowAction={(f) => <button className="btn btn-danger btn-xs" onClick={() => A.unstageFiles(path, repo.fileSel.length > 1 && repo.fileSel.includes(f.path) ? st.staged.filter((x) => repo.fileSel.includes(x.path)) : [f])}>Unstage File</button>}
+      onDirContext={(d, fl) => QM.dirMenu(path, d, fl, 'staged')}
+      rowAction={(f) => <button className="btn btn-danger btn-xs" onClick={() => A.unstageFiles(path, forRow(st.staged, f))}>Unstage File</button>}
     />
   )
+
+  // the grip at the top of the commit panel: it grows upwards, the two lists keep sharing what is left 50/50
+  const onGrip = (e: React.PointerEvent) => {
+    e.preventDefault()
+    const y0 = e.clientY, h0 = boxH
+    const room = (listsRef.current?.clientHeight ?? 0) - LISTS_MIN
+    const max = Math.max(COMMIT_PANEL_MIN, h0 + room)
+    const move = (ev: PointerEvent) => { commitPanelHeight = Math.max(COMMIT_PANEL_MIN, Math.min(max, h0 - (ev.clientY - y0))); setBoxH(commitPanelHeight) }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); document.body.classList.remove('resizing-rows') }
+    document.body.classList.add('resizing-rows')
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  const section = (open: boolean) => ({ flex: open ? '1 1 0' : '0 0 auto' })
+  const caret = (open: boolean) => <Icon name="caret-down" className="wip-caret" style={open ? undefined : { transform: 'rotate(-90deg)' }} />
 
   return (
     <div className="wip-panel">
@@ -80,20 +114,23 @@ export function WipPanel({ repo }: { repo: RepoView }) {
         </div>
       ) : (
         <div className="wip-header">
-          <span className="wip-discard" title="Discard all changes" onClick={() => A.discardAll(path)}><Icon name="trash-o" /></span>
-          <span className="wip-header-text">{total} file change{total === 1 ? '' : 's'} on <span className="pill pill-teal">{branch}</span></span>
+          <button className="btn btn-danger btn-small wip-discard" title={selUn.length > 1 ? `Discard ${selUn.length} files` : 'Discard all changes'}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => (selUn.length > 1 ? A.discardFiles(path, selUn) : A.discardAll(path))}>
+            <Icon name="trash" />{selUn.length > 1 ? <span className="fs-2 ml1">{selUn.length}</span> : null}
+          </button>
+          <span className="wip-header-text">{`${total} file change${total === 1 ? '' : 's'} on`} <span className="pill pill-teal" title={branch}>{branch}</span></span>
         </div>
       )}
 
       <FileListToolbar mode={mode} setMode={setMode} sortDesc={sortDesc} setSortDesc={setSortDesc} />
 
-      <div className="wip-lists">
+      <div className="wip-lists" ref={listsRef}>
         {st.conflicted.length || inOp ? (
-          <div className="wip-section" style={{ flex: openSt ? `${splitPct} 1 0` : '1 1 0' }}>
-            <div className="wip-section-header" onClick={() => setOpenUn((v) => !v)}>
-              <Icon name={openUn ? 'caret-down' : 'chevron-right'} className="wip-caret" />
-              <span>Conflicted Files ({st.conflicted.length})</span>
-              {st.conflicted.length ? <button className="btn btn-warning btn-xs" onClick={(e) => { e.stopPropagation(); void A.markResolved(path, st.conflicted.map((f) => f.path)) }}>Mark All Resolved</button> : null}
+          <div className="wip-section" style={section(openUn)}>
+            <div className="wip-section-header">
+              <span className="wip-section-toggle" onClick={() => setOpenUn((v) => !v)}>{caret(openUn)}<span className="wip-section-title">{`Conflicted Files (${st.conflicted.length})`}</span></span>
+              {st.conflicted.length ? <button className="btn btn-warning btn-xs" onMouseDown={(e) => e.preventDefault()} onClick={() => void A.markResolved(path, st.conflicted.map((f) => f.path))}>Mark All Resolved</button> : null}
             </div>
             {openUn ? (
               <div className="wip-section-body">
@@ -103,35 +140,45 @@ export function WipPanel({ repo }: { repo: RepoView }) {
                   sortDesc={sortDesc}
                   activePath={activeConflict}
                   onOpen={(f) => A.openMerge(path, f.path)}
+                  onClose={close}
                   onContext={(f) => fileMenu(path, f, 'conflicted')}
+                  onDirContext={(d, fl) => QM.dirMenu(path, d, fl, 'conflicted')}
                   rowAction={(f) => <button className="btn btn-warning btn-xs" onClick={() => A.markResolved(path, [f.path])}>Mark Resolved</button>}
                 />
-                {opUnstaged.length ? <><div className="wip-subheader">Unstaged Files ({opUnstaged.length})</div>{unstagedList}</> : null}
+                {opUnstaged.length ? <><div className="wip-subheader">{`Unstaged Files (${opUnstaged.length})`}</div>{unstagedList}</> : null}
               </div>
             ) : null}
           </div>
         ) : (
-          <div className="wip-section" style={{ flex: openSt ? `${splitPct} 1 0` : '1 1 0' }}>
-            <div className="wip-section-header" onClick={() => setOpenUn((v) => !v)}>
-              <Icon name={openUn ? 'caret-down' : 'chevron-right'} className="wip-caret" />
-              <span>Unstaged Files ({st.unstaged.length})</span>
-              {st.unstaged.length ? <button className="btn btn-success btn-xs" onClick={(e) => { e.stopPropagation(); void A.stageAll(path) }}>Stage All Changes</button> : null}
+          <div className="wip-section" style={section(openUn)}>
+            <div className="wip-section-header">
+              <span className="wip-section-toggle" onClick={() => setOpenUn((v) => !v)}>{caret(openUn)}<span className="wip-section-title">{`Unstaged Files (${st.unstaged.length})`}</span></span>
+              {st.unstaged.length ? (
+                <button className="btn btn-success btn-xs" onMouseDown={(e) => e.preventDefault()} onClick={() => void (selUn.length > 1 ? A.stageFiles(path, selUn) : A.stageAll(path))}>
+                  {selUn.length > 1 ? `Stage ${selUn.length} Files` : 'Stage All Changes'}
+                </button>
+              ) : null}
             </div>
             {openUn ? <div className="wip-section-body">{unstagedList}</div> : null}
           </div>
         )}
-        {openUn && openSt ? <HSplit onDrag={(dy, h) => setSplitPct((p) => Math.max(15, Math.min(85, p + (dy / h) * 100)))} /> : null}
-        <div className="wip-section" style={{ flex: openSt ? `${100 - splitPct} 1 0` : '0 0 auto' }}>
-          <div className="wip-section-header" onClick={() => setOpenSt((v) => !v)}>
-            <Icon name={openSt ? 'caret-down' : 'chevron-right'} className="wip-caret" />
-            <span>{inOp ? 'Resolved Files' : 'Staged Files'} ({st.staged.length})</span>
-            {st.staged.length && !inOp ? <button className="btn btn-danger btn-xs" onClick={(e) => { e.stopPropagation(); void A.unstageAll(path) }}>Unstage All Changes</button> : null}
+        <div className="wip-section" style={section(openSt)}>
+          <div className="wip-section-header">
+            <span className="wip-section-toggle" onClick={() => setOpenSt((v) => !v)}>{caret(openSt)}<span className="wip-section-title">{`${inOp ? 'Resolved Files' : 'Staged Files'} (${st.staged.length})`}</span></span>
+            {st.staged.length && !inOp ? (
+              <button className="btn btn-danger btn-xs" onMouseDown={(e) => e.preventDefault()} onClick={() => void (selSt.length > 1 ? A.unstageFiles(path, selSt) : A.unstageAll(path))}>
+                {selSt.length > 1 ? `Unstage ${selSt.length} Files` : 'Unstage All Changes'}
+              </button>
+            ) : null}
           </div>
           {openSt ? <div className="wip-section-body">{stagedList}</div> : null}
         </div>
       </div>
 
-      <CommitBox repo={repo} />
+      <div className="commit-panel" style={{ height: boxH }}>
+        <div className="commit-panel-grip" title="Resize Panel" onPointerDown={onGrip}><span /></div>
+        <CommitBox repo={repo} />
+      </div>
     </div>
   )
 }
@@ -140,22 +187,16 @@ function opTitle(kind: string) {
   return kind === 'merge' ? 'Merge' : kind === 'rebase' ? 'Rebase' : kind === 'cherry-pick' ? 'Cherry pick' : kind === 'am' ? 'Patch' : 'Revert'
 }
 
-function HSplit({ onDrag }: { onDrag: (dy: number, height: number) => void }) {
-  return (
-    <div
-      className="hsplit"
-      onMouseDown={(e) => {
-        e.preventDefault()
-        const container = (e.currentTarget.parentElement as HTMLElement)
-        let last = e.clientY
-        const move = (ev: MouseEvent) => { onDrag(ev.clientY - last, container.clientHeight); last = ev.clientY }
-        const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-        window.addEventListener('mousemove', move)
-        window.addEventListener('mouseup', up)
-      }}
-    ><div className="hsplit-grip" /></div>
-  )
+/** the original's commit button wording, in its rule order */
+export function commitLabel(o: { staged: number; amend: boolean; summary: string; push: boolean; skipHooks: boolean }): { label: string; enabled: boolean } {
+  if (!o.staged && !o.amend) return { label: 'Stage Changes to Commit', enabled: false }
+  if (!o.summary.trim()) return { label: 'Type a Message to Commit', enabled: false }
+  const suffix = `${o.push ? ' and Push' : ''}${o.skipHooks ? ' (Skip Hooks)' : ''}`
+  if (o.amend) return { label: `Amend Previous Commit${suffix}`, enabled: true }
+  return { label: `Commit Changes to ${o.staged} File${o.staged === 1 ? '' : 's'}${suffix}`, enabled: true }
 }
+
+const SUMMARY_TIP = 'Commit summaries no longer than 72 characters will be fully displayed in most websites and CLI tools.'
 
 function CommitBox({ repo }: { repo: RepoView }) {
   const path = repo.path
@@ -171,9 +212,11 @@ function CommitBox({ repo }: { repo: RepoView }) {
   const [showOpts, setShowOpts] = useState(false)
   const [noVerify, setNoVerify] = useState(() => getState().settings!.skipHooksDefault)
   const [pushAfter, setPushAfter] = useState(() => getState().settings!.pushAfterCommit)
+  const [hooks, setHooks] = useState<string[]>([])
   const spell = useStore((x) => x.settings!.spellcheck)
   const [stashTitle, setStashTitle] = useState('')
   const [stashBody, setStashBody] = useState('')
+  const summaryRef = useRef<HTMLInputElement>(null)
   // pre-fill with the repository's commit template (commit.template) when the box is empty
   useEffect(() => {
     if (inOp || summary || description) return
@@ -185,6 +228,13 @@ function CommitBox({ repo }: { repo: RepoView }) {
     })
     return () => { alive = false }
   }, [path, inOp]) // eslint-disable-line react-hooks/exhaustive-deps
+  // like the original: "Skip Git hooks" is only offered when the repository has commit hooks
+  useEffect(() => {
+    let alive = true
+    void api.commitHooks(path).then((h) => alive && setHooks(h)).catch(() => undefined)
+    return () => { alive = false }
+  }, [path, showOpts])
+  const skipHooks = noVerify && hooks.length > 0
 
   let label: string
   let enabled = false
@@ -192,27 +242,27 @@ function CommitBox({ repo }: { repo: RepoView }) {
     if (st.conflicted.length) label = state.kind === 'merge' ? 'No Changes to Merge' : 'Resolve conflicts to continue'
     else if (state.kind === 'merge') { label = summary.trim() ? 'Commit and Merge' : 'Type a Message to Commit'; enabled = !!summary.trim() }
     else { label = `Continue ${opTitle(state.kind)}`; enabled = true }
-  } else if (!summary.trim()) label = 'Type a Message to Commit'
-  else if (!staged && !amend) label = 'Stage Changes to Commit'
-  else {
-    // the original's wording: "Commit Changes to N Files" + " and Push" + " (Skip Hooks)"
-    label = amend ? 'Amend Previous Commit' : `Commit Changes to ${staged} File${staged === 1 ? '' : 's'}${pushAfter ? ' and Push' : ''}${noVerify ? ' (Skip Hooks)' : ''}`
-    enabled = true
-  }
+  } else ({ label, enabled } = commitLabel({ staged, amend, summary, push: pushAfter, skipHooks }))
 
-  const submit = () => {
+  const submit = async () => {
     if (!enabled) return
-    if (inOp && state.kind !== 'merge') void A.continueOp(path)
-    else void A.commit(path, { noVerify, push: pushAfter })
+    if (inOp && state.kind !== 'merge') { void A.continueOp(path); return }
+    await A.commit(path, { noVerify: skipHooks, push: pushAfter })
+    // like the original, the commit options go back to their defaults after a commit
+    const set = getState().settings!
+    setNoVerify(set.skipHooksDefault)
+    setPushAfter(set.pushAfterCommit)
   }
   const dirty = st.staged.length + st.unstaged.length > 0
   const changedFiles = new Set([...st.staged, ...st.unstaged].map((f) => f.path)).size
+  const onEnter = (e: React.KeyboardEvent) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) void submit() }
 
   return (
     <div className="commit-box">
       <div className="commit-tabs">
         <span className={`commit-tab${tab === 'commit' ? ' active' : ''}`} onClick={() => setTab('commit')}><Icon name="commit" /> Commit</span>
         {!inOp ? <span className={`commit-tab icon-only${tab === 'stash' ? ' active' : ''}`} title="Stash" onClick={() => setTab('stash')}><Icon name="stash" /></span> : null}
+        <span className="commit-tabs-end" />
       </div>
       {tab === 'stash' && !inOp ? (
         <div className="stash-box">
@@ -231,21 +281,22 @@ function CommitBox({ repo }: { repo: RepoView }) {
         </div>
       ) : <>
       {!inOp ? (
-        <label className="amend-check">
-          <input type="checkbox" checked={amend} disabled={s.head.unborn} onChange={(e) => A.setAmend(path, e.target.checked)} /> Amend previous commit
-        </label>
+        <div className="amend-check">
+          <Checkbox checked={amend} disabled={s.head.unborn} onChange={(v) => { void A.setAmend(path, v).then(() => { if (v) summaryRef.current?.focus() }) }}>Amend previous commit</Checkbox>
+        </div>
       ) : null}
       <div className="commit-message-inputs">
         <div className="commit-summary-row">
           <input
+            ref={summaryRef}
             className="commit-summary-input"
             spellCheck={spell}
             placeholder="Commit summary"
             value={summary}
             onChange={(e) => setWip({ summary: e.target.value })}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) submit() }}
+            onKeyDown={onEnter}
           />
-          <span className={`commit-count${remaining < 0 ? ' over' : ''}`}>{remaining}</span>
+          <span className={`commit-count${remaining < 0 ? ' over' : ''}`} title={SUMMARY_TIP}>{remaining}</span>
         </div>
         <textarea
           className="commit-description-input"
@@ -253,25 +304,24 @@ function CommitBox({ repo }: { repo: RepoView }) {
           placeholder="Description"
           value={description}
           onChange={(e) => setWip({ description: e.target.value })}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) submit() }}
+          onKeyDown={onEnter}
         />
       </div>
       {!inOp ? (
         <div className="commit-options">
           <div className="commit-options-toggle" onClick={() => setShowOpts((v) => !v)}><Icon name={showOpts ? 'chevron-down' : 'chevron-right'} /> Commit options</div>
           {showOpts ? (
-            <div className="commit-options-body">
-              <label className="form-check"><input type="checkbox" checked={pushAfter} onChange={(e) => setPushAfter(e.target.checked)} /> Push after committing</label>
-              <label className="form-check"><input type="checkbox" checked={noVerify} onChange={(e) => setNoVerify(e.target.checked)} /> Skip Git hooks</label>
+            <div className={`commit-checkboxes${hooks.length ? ' two' : ''}`}>
+              <Checkbox checked={pushAfter} onChange={setPushAfter}>Push after committing</Checkbox>
+              {hooks.length ? <Checkbox checked={noVerify} onChange={setNoVerify}>Skip Git hooks</Checkbox> : null}
             </div>
           ) : null}
         </div>
       ) : null}
       <div className="commit-buttons">
-        <button className={`btn btn-success btn-commit${enabled ? '' : ' disabled'}`} disabled={!enabled} onClick={submit}>
+        <button className={`btn btn-success btn-commit${enabled ? '' : ' disabled'}`} disabled={!enabled} onClick={() => void submit()}>
           <Icon name="commit" /> {label}
         </button>
-        {amend && !inOp ? <button className="btn btn-default btn-commit btn-skip" onClick={() => A.setAmend(path, false)}>Cancel Amend</button> : null}
         {inOp ? (
           <>
             {state.kind === 'rebase' || state.kind === 'cherry-pick' || state.kind === 'am' ? <button className="btn btn-default btn-commit btn-skip" onClick={() => A.skipOp(path)}>Skip</button> : null}

@@ -34,7 +34,7 @@ export async function gitkrakenSettings(): Promise<Record<string, unknown>> {
     const list = get('fileNodeList', 'viewMode'); if (list === 'tree') out.fileListMode = 'tree'; else if (list === 'full_path') out.fileListMode = 'path'
     const ef = get('editor', 'fontFamily'); if (typeof ef === 'string' && ef) out.editorFont = ef
     const tf = get('cli', 'fontFamily'); if (typeof tf === 'string' && tf) out.terminalFont = tf
-    const theme = get('ui', 'theme'); if (typeof theme === 'string') out.theme = /light/i.test(theme) ? 'light' : 'dark'
+    const theme = get('ui', 'theme'); if (typeof theme === 'string') out.theme = /sync|system/i.test(theme) ? 'system' : /light/i.test(theme) ? (/legacy/i.test(theme) ? (/high/i.test(theme) ? 'light-hc-legacy' : 'light-legacy') : /high/i.test(theme) ? 'light-hc' : 'light') : /high/i.test(theme) ? 'dark' : 'gk-dark'
     return out
   }
   return {}

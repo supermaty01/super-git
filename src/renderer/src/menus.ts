@@ -1,12 +1,17 @@
 // Native context menus. Structure, ordering and wording follow the original application
 // (AI / cloud / pull-request entries are intentionally left out).
 import * as A from './actions'
+import { removeWorktreeK2, remoteOf, openWorktree } from './k2worktree'
 import * as A2 from './actions2'
 import { stashKey } from './lib/format'
 import { api } from './lib/api'
-import { openModal, getState, updateRepo, showPrompt } from './store'
+import { openModal, getState, updateRepo, showPrompt, toast } from './store'
 import type { Commit, Ref, Stash, Worktree, FileChange, FileContext, Remote, Submodule, RepoSnapshot } from '@shared/types'
 import type { MI } from './actions'
+import { childrenOnPath, hasInteractiveRebaseSteps } from './graph/history'
+import * as WM from './wipMenus'
+import { copyLinkItems, copyBranchLinkItems } from './deeplink'
+import * as QM from './quickMenus'
 
 const remotesOf = (path: string): Remote[] => A.snap(path).remotes
 const editorName = () => { const e = (getState().settings?.externalEditor || 'code').toLowerCase(); return e === 'code' || e.includes('code') ? 'VS Code' : 'external editor' }
@@ -58,13 +63,14 @@ async function mergeIntoOther(path: string, target: Ref, src: Ref) {
   await A2.mergeNoFF(path, src.short)
 }
 
-function rebaseItems(path: string, onto: Ref, _sha: string): MI[] {
+function rebaseItems(path: string, onto: Ref, _sha: string, interactive = true): MI[] {
   const s = A.snap(path)
   const cur = s.head.branch
   if (!cur || onto.isCurrent) return []
   return [
     { label: `Rebase ${cur} onto ${onto.short}`, act: () => A.rebaseOnto(path, onto.short) },
-    { label: `Interactive Rebase ${cur} onto ${onto.short}`, act: () => A.startInteractiveRebase(path, onto.sha, undefined, onto.short) }
+    // like the original, only when there are steps to edit (HEAD's own commits, none of them a merge)
+    ...(interactive && hasInteractiveRebaseSteps(s.commits, s.head.sha, onto.sha) ? [{ label: `Interactive Rebase ${cur} onto ${onto.short}`, act: () => A.startInteractiveRebase(path, onto.sha, undefined, onto.short) } as MI] : [])
   ]
 }
 
@@ -84,7 +90,8 @@ function pinItem(path: string, refs: Ref[]): MI {
     const r = refs[0]
     return { label: pinned === r.name ? 'Unpin from Left' : 'Pin to Left', act: () => A2.setPinned(path, pinned === r.name ? null : r.name) }
   }
-  return { label: 'Pin to Left', sub: refs.map((r) => ({ label: r.short, checked: pinned === r.name, act: () => A2.setPinned(path, pinned === r.name ? null : r.name) })) }
+  // plain items in the original (no checkboxes)
+  return { label: 'Pin to Left', sub: refs.map((r) => ({ label: r.short, act: () => A2.setPinned(path, pinned === r.name ? null : r.name) })) }
 }
 
 function soloItem(path: string, refs: Ref[]): MI {
@@ -120,16 +127,27 @@ function linearChain(s: RepoSnapshot): Commit[] {
   return out
 }
 
-/** "Interactive Rebase N children of …", "Edit commit message", "Drop commit", "Move commit up/down" */
+/** "Edit commit message" for HEAD's linear history; the original lists it right before "Revert commit" */
+function editMessageItem(path: string, c: Commit): MI[] {
+  const s = A.snap(path)
+  return linearChain(s).some((x) => x.sha === c.sha) ? [{ label: 'Edit commit message', act: () => A.rewordCommit(path, c) }] : []
+}
+
+/** "Interactive Rebase N children of …": the commits from HEAD down its first parents (a merge commit at the end included) */
+function interactiveChildrenItem(path: string, c: Commit): MI[] {
+  const s = A.snap(path)
+  const n = s.head.detached ? null : childrenOnPath(s.commits, s.head.sha, c.sha)
+  return n ? [{ label: `Interactive Rebase ${n} children of ${c.sha.slice(0, 6)}`, act: () => A.startInteractiveRebase(path, c.sha) }] : []
+}
+
+/** "Interactive Rebase N children of …", "Drop commit", "Move commit up/down" */
 function historyItems(path: string, c: Commit): MI[] {
   const s = A.snap(path)
   const chain = linearChain(s)
   const i = chain.findIndex((x) => x.sha === c.sha)
-  if (i < 0) return []
+  if (i < 0) return interactiveChildrenItem(path, c)
   const unpushed = !!s.refs.find((r) => r.type === 'head' && r.isCurrent && (r.ahead ?? 0) > 0) || !s.refs.some((r) => r.type === 'head' && r.isCurrent && r.upstream)
-  const items: MI[] = []
-  if (i > 0) items.push({ label: `Interactive Rebase ${i} children of ${c.sha.slice(0, 6)}`, act: () => A.startInteractiveRebase(path, c.sha) })
-  items.push({ label: 'Edit commit message', act: () => A.rewordCommit(path, c) })
+  const items: MI[] = [...interactiveChildrenItem(path, c)]
   if (i > 0 || unpushed) items.push({ label: 'Drop commit', act: () => A.dropCommits(path, [c.sha]) })
   if (i > 0) items.push({ label: 'Move commit up', act: () => A.moveCommit(path, c.sha, 'up') })
   if (chain[i + 1] && (i > 0 || unpushed)) items.push({ label: 'Move commit down', act: () => A.moveCommit(path, c.sha, 'down') })
@@ -142,27 +160,33 @@ export function commitMenu(path: string, c: Commit): Promise<void> {
   const multi = sel?.kind === 'commits' && sel.shas.length > 1 && sel.shas.includes(c.sha) ? sel.shas : null
   const isHead = c.sha === s.head.sha
   const branch = s.head.branch ?? 'HEAD'
+  // several commits: like the original, "Cherry pick N commits" unless a merge commit or a stash is among them,
+  // no squash / drop, and a patch only for a first-parent range (the one whose combined diff the commit panel shows)
+  const ordered = multi ? s.commits.filter((x) => multi.includes(x.sha)) : []
+  const pickable = !!multi && ordered.length === multi.length && ordered.every((x) => x.parents.length < 2)
+  const contiguous = ordered.length === multi?.length && ordered.every((x, i) => i === ordered.length - 1 || x.parents[0] === ordered[i + 1].sha)
   const items: MI[] = [
     { label: 'Checkout this commit', act: () => A.checkoutCommit(path, c.sha), enabled: !isHead || !s.head.detached },
     '-',
     { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { ref: c.sha }) },
     '-',
     { label: 'Create branch here', act: () => A.startCreateRef(path, 'branch', c.sha) },
-    multi
-      ? { label: `Cherry pick ${multi.length} commits`, act: () => A.cherryPick(path, multi) }
-      : { label: 'Cherry pick commit', act: () => A.cherryPick(path, [c.sha]), enabled: !isHead },
+    ...(multi
+      ? (pickable ? [{ label: `Cherry pick ${multi.length} commits`, act: () => A.cherryPick(path, multi) } as MI] : [])
+      : [{ label: 'Cherry pick commit', act: () => A.cherryPick(path, [c.sha]), enabled: !isHead } as MI]),
     ...(isHead ? [] : [{ label: `Rebase ${branch} onto this commit`, act: () => A.rebaseOnto(path, c.sha) } as MI]),
     resetSub(path, c.sha),
+    ...(multi ? [] : editMessageItem(path, c)),
     { label: 'Revert commit', act: () => A.revertCommit(path, c) },
     '-',
-    ...(multi ? [
-      { label: `Squash ${multi.length} commits`, act: () => A.squashCommits(path, multi) } as MI,
-      { label: `Drop ${multi.length} commits`, act: () => A.dropCommits(path, multi) } as MI
-    ] : historyItems(path, c)),
+    ...(multi ? interactiveChildrenItem(path, c) : historyItems(path, c)),
     '-',
     { label: 'Copy commit sha', act: () => api.copy(multi ? multi.join('\n') : c.sha) },
+    ...(multi ? [] : copyLinkItems(path, 'commit', c.sha)),
     multi
-      ? { label: 'Create patch from commits', act: () => A2.createPatch(path, multi) }
+      ? contiguous
+        ? { label: 'Create patch from commits', act: () => A2.createPatch(path, multi) }
+        : { label: 'Create patch from commits (the combined diff is not shown)', enabled: false }
       : { label: 'Create patch from commit', act: () => A2.createPatch(path, [c.sha]) },
     ...(isHead ? [{ label: 'Apply patch', act: () => A2.applyPatch(path) } as MI] : []),
     '-',
@@ -213,13 +237,22 @@ export async function refGroupMenu(path: string, refs: Ref[], opts: { inLeftPane
     if (gf) items.push({ label: `Finish ${local.short}`, act: () => A2.gitflowFinish(path, gf.type, gf.name) }, '-')
   }
   if (!local?.isCurrent) {
-    items.push(...(await mergeItems(path, primary)), ...rebaseItems(path, primary, sha), '-')
+    items.push(...(await mergeItems(path, primary)), ...rebaseItems(path, primary, sha, !opts.inLeftPanel), '-')
   }
+  // the original's left panel menu lists a branch that is checked out in a worktree differently
+  const wtOf = opts.inLeftPanel && local && !local.isCurrent ? s.worktrees.find((w) => !w.isCurrent && w.branch?.replace(/^refs\/heads\//, '') === local.short) : undefined
   // checkout / worktree submenus list each ref of the label plus "this commit"
   const checkoutTargets = branchRefs.filter((r) => !r.isCurrent)
   if (opts.inLeftPanel) {
-    if (!primary.isCurrent) items.push({ label: `Checkout ${primary.short}`, act: () => A.checkoutRef(path, primary) }, '-')
-    items.push({ label: `Create worktree from ${primary.short}`, act: () => A.addWorktreeDialog(path, { ref: primary.name }), enabled: !primary.isCurrent }, '-')
+    if (wtOf) items.push({ label: `Open worktree from ${primary.short}`, act: () => A.openRepo(wtOf.path) }, '-')
+    else if (!primary.isCurrent) items.push({ label: `Checkout ${primary.short}`, act: () => A.checkoutRef(path, primary) }, '-',
+      { label: `Create worktree from ${primary.short}`, act: () => A.addWorktreeDialog(path, { ref: primary.name }) }, '-')
+  } else if (!checkoutTargets.length) {
+    // nothing but the current branch on the label: flat items, like the original
+    items.push(
+      { label: 'Checkout this commit', act: () => A.checkoutCommit(path, sha) }, '-',
+      { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { ref: sha }) }, '-'
+    )
   } else {
     items.push({
       label: 'Checkout', sub: [
@@ -233,22 +266,35 @@ export async function refGroupMenu(path: string, refs: Ref[], opts: { inLeftPane
       ]
     }, '-')
   }
+  const hist = isHead && commit ? historyItems(path, commit) : []
   items.push(
     { label: 'Create branch here', act: () => A.startCreateRef(path, 'branch', sha) },
     ...(isHead ? [] : [{ label: 'Cherry pick commit', act: () => A.cherryPick(path, [sha]) } as MI]),
     resetSub(path, sha),
+    ...(isHead && commit ? editMessageItem(path, commit) : []),
     ...(commit ? [{ label: 'Revert commit', act: () => A.revertCommit(path, commit) } as MI] : []),
     '-',
-    ...(isHead && commit ? historyItems(path, commit) : []),
+    ...hist,
     '-'
   )
   if (isHead) items.push({ label: 'Apply patch', act: () => A2.applyPatch(path) })
-  if (local) items.push({ label: `Rename ${local.short}`, act: () => A.renameBranch(path, local) }, { label: `Delete ${local.short}`, act: () => A.deleteLocalBranch(path, local), enabled: !local.isCurrent })
+  // like the original, "Delete <current branch>" is enabled and explains why it can't be done
+  if (local) {
+    items.push({ label: `Rename ${local.short}`, act: () => A.renameBranch(path, local) })
+    if (wtOf) {
+      if (!wtOf.isMain) items.push({ label: 'Remove this worktree', act: () => A.removeWorktree(path, wtOf) }, { label: 'Remove worktree and delete branch', act: () => A.removeWorktree(path, wtOf, true) })
+    } else items.push({
+      label: `Delete ${local.short}`,
+      act: () => (local.isCurrent ? toast({ kind: 'error', title: `Could not delete ${local.short}`, message: 'Cannot delete currently checked out branch. Switch branches first.' }) : A.deleteLocalBranch(path, local))
+    })
+  }
   for (const r of remotesInGroup) items.push({ label: `Delete ${r.short}`, act: () => A.deleteRemoteBranch(path, r) })
   if (local && remotesInGroup.length) items.push({ label: remotesInGroup.length === 1 ? `Delete ${local.short} and ${remotesInGroup[0].short}` : `Delete all "${local.short}" branches (local && remote)`, enabled: !local.isCurrent, act: () => A.deleteBranchEverywhere(path, local, remotesInGroup) })
   items.push('-',
     { label: 'Copy branch name', act: () => api.copy(primary.short) },
     { label: 'Copy commit sha', act: () => api.copy(sha) },
+    ...copyBranchLinkItems(path, branchRefs),
+    ...copyLinkItems(path, 'commit', sha),
     ...(opts.inLeftPanel ? [] : [{ label: 'Create patch from commit', act: () => A2.createPatch(path, [sha]) } as MI]),
     '-',
     ...(opts.inLeftPanel ? [hideItem(path, branchRefs)] : []),
@@ -302,8 +348,7 @@ export async function tagMenu(path: string, ref: Ref, opts: { inLeftPanel?: bool
     '-',
     { label: opts.inLeftPanel ? `Checkout the commit at ${ref.short}` : 'Checkout this commit', act: () => A.checkoutCommit(path, ref.sha) },
     '-',
-    { label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { ref: ref.sha }) },
-    '-',
+    ...(opts.inLeftPanel ? [] : [{ label: 'Create worktree from this commit', act: () => A.addWorktreeDialog(path, { ref: ref.sha }) } as MI, '-' as MI]),
     { label: 'Create branch here', act: () => A.startCreateRef(path, 'branch', ref.sha) },
     ...(isHead ? [] : [{ label: 'Cherry pick commit', act: () => A.cherryPick(path, [ref.sha]) } as MI]),
     resetSub(path, ref.sha),
@@ -313,6 +358,8 @@ export async function tagMenu(path: string, ref: Ref, opts: { inLeftPanel?: bool
     ...(delItems.length > 1 ? [{ label: 'Delete tag from remote', sub: [...delItems, '-', { label: `Delete ${ref.short} from all remotes`, act: () => A.deleteTagFromAllRemotes(path, ref, delFrom) }] } as MI] : delItems),
     '-',
     { label: 'Copy tag name', act: () => api.copy(ref.short) },
+    '-',
+    ...copyLinkItems(path, 'tag', ref.short),
     '-',
     ...(opts.inLeftPanel ? [hideItem(path, [ref])] : []),
     soloItem(path, [ref]),
@@ -364,15 +411,20 @@ export async function folderMenu(path: string, folder: string, refs: Ref[]): Pro
 }
 
 export function worktreeMenu(path: string, wt: Worktree): Promise<void> {
-  // the worktree that is open has nothing to offer in the original
-  if (wt.isCurrent) return A.popup([{ label: '(no actions)', enabled: false }])
   const branch = wt.branch?.replace(/^refs\/heads\//, '')
+  const hasRemote = !!remoteOf(path, branch)
+  const removeItems: MI[] = wt.isMain ? [] : [
+    { label: 'Remove this worktree', act: () => removeWorktreeK2(path, wt) },
+    ...(branch ? [{ label: 'Remove worktree and delete branch', act: () => removeWorktreeK2(path, wt, 'local') } as MI] : []),
+    ...(branch && hasRemote ? [{ label: 'Remove worktree and delete branch (local && remote)', act: () => removeWorktreeK2(path, wt, 'both') } as MI] : [])
+  ]
+  // the open worktree can only be removed (from the main one, which this tab switches to first)
+  if (wt.isCurrent) return A.popup(removeItems.length ? removeItems : [{ label: '(no actions)' }])
   return A.popup([
-    { label: 'Open this worktree', act: () => A2.openInThisTab(path, wt.path) },
-    { label: 'Open worktree in new tab', act: () => A.openRepo(wt.path) },
+    { label: 'Open this worktree', act: () => openWorktree(path, wt.path, false) },
+    { label: 'Open worktree in new tab', act: () => openWorktree(path, wt.path, true) },
     ...(wt.isMain ? [] : [
-      { label: 'Remove this worktree', act: () => A.removeWorktree(path, wt) } as MI,
-      ...(branch ? [{ label: 'Remove worktree and delete branch', act: () => A.removeWorktree(path, wt, true) } as MI] : []),
+      ...removeItems,
       '-' as MI,
       wt.locked
         ? { label: 'Unlock this worktree', act: () => A.run(path, () => api.lockWorktree(path, wt.path, null), { errorTitle: 'Could not unlock worktree' }) } as MI
@@ -383,7 +435,12 @@ export function worktreeMenu(path: string, wt: Worktree): Promise<void> {
 
 export function submoduleMenu(path: string, sm: Submodule): Promise<void> {
   return A.popup([
-    { label: `Update ${sm.path}`, act: () => A2.submoduleUpdate(path, sm.path) },
+    { label: sm.state === '-' ? `Initialize ${sm.path}` : `Update ${sm.path}`, act: () => A2.submoduleUpdate(path, sm.path) },
+    { label: 'Edit Submodule URL', act: () => showPrompt({ kind: 'input', message: `URL of ${sm.path}:`, value: sm.url ?? '', requireValue: true, submitLabel: 'Save',
+      onSubmit: (v) => A.run(path, () => api.setSubmoduleUrl(path, sm.path, v.trim()), { errorTitle: 'Could not edit the submodule', success: 'Submodule updated' }) }) },
+    { label: 'Discard Submodule Changes', enabled: sm.state === '+' || sm.state === ' ', act: () => showPrompt({ kind: 'confirm', message: `This will discard all changes in the submodule "${sm.path}". Are you sure?`,
+      buttons: [{ label: 'Discard Changes', style: 'danger', run: () => A.run(path, () => api.discardSubmodule(path, sm.path), { errorTitle: 'Could not discard the submodule changes' }) }] }) },
+    { label: 'Commit Changes', enabled: sm.state === '+', act: () => A.run(path, () => api.stage(path, [sm.path])) },
     '-',
     { label: `Edit ${sm.path}`, act: () => openModal('repoPrefs', { path: `${path}\\${sm.path.replace(/\//g, '\\')}` }), enabled: sm.state !== '-' },
     { label: 'Open this submodule', act: () => A2.openSubmodule(path, sm.path), enabled: sm.state !== '-' },
@@ -401,7 +458,7 @@ export const LEFT_SECTIONS: Array<{ id: string; label: string; locked?: boolean 
   { id: 'worktrees', label: 'Worktrees' }, { id: 'stashes', label: 'Stashes' }, { id: 'tags', label: 'Tags' }, { id: 'submodules', label: 'Submodules' }
 ]
 
-export function sectionMenu(path: string, id: string, onMaximize: () => void): Promise<void> {
+export function sectionMenu(path: string, id: string, onMaximize: () => void, canMaximize = true): Promise<void> {
   const s = A.snap(path)
   const set = getState().settings!
   const hiddenSecs = set.hiddenSections
@@ -426,7 +483,7 @@ export function sectionMenu(path: string, id: string, onMaximize: () => void): P
   }
   return A.popup([
     ...top,
-    { label: 'Maximize this section', act: onMaximize },
+    { label: 'Maximize this section', act: onMaximize, enabled: canMaximize },
     '-',
     ...LEFT_SECTIONS.filter((sec) => sec.id !== 'gitflow' || s.gitflow.initialized).map((sec) => ({
       label: sec.label, checked: !hiddenSecs.includes(sec.id), enabled: !sec.locked,
@@ -438,25 +495,36 @@ export function sectionMenu(path: string, id: string, onMaximize: () => void): P
 // ---------------------------------------------------------------------------------------------
 // graph header
 
-export function graphHeaderMenu(path: string, autoReset: () => void): Promise<void> {
+export function graphHeaderMenu(path: string, autoReset: (compact: boolean) => void): Promise<void> {
   const set = getState().settings!
   const c = set.graphColumns
   const toggle = (k: keyof typeof c) => A2.saveSettings({ graphColumns: { ...c, [k]: !c[k] } })
   const smart = !!set.smartVisibility[path]
+  // like the original: no "Changes" entry, and the last visible column cannot be turned off
+  const ids = ['ref', 'graph', 'message', 'author', 'date', 'sha'] as const
+  const visible = ids.filter((k) => c[k]).length
+  const col = (label: string, k: typeof ids[number]): MI => ({ label, checked: c[k], enabled: !(c[k] && visible === 1), act: () => toggle(k) })
+  // the original resets visibility, order, widths and mode (default: everything but Changes; compact: avatars,
+  // icon-only labels and no date)
+  const reset = (compact: boolean) => {
+    A2.saveSettings(compact
+      ? { graphColumns: { ...c, ref: true, graph: true, message: true, author: true, date: false, sha: true, changes: false }, graphColumnOrder: ['ref', 'graph', 'author', 'message', 'changes', 'date', 'sha'], compactGraph: true }
+      : { graphColumns: { ...c, ref: true, graph: true, message: true, author: true, date: true, sha: true, changes: false }, graphColumnOrder: [], compactGraph: false })
+    autoReset(compact)
+  }
   return A.popup([
-    { label: 'Branch / Tag', checked: c.ref, act: () => toggle('ref') },
-    { label: 'Graph', checked: c.graph, act: () => toggle('graph') },
-    { label: 'Commit message', checked: c.message, act: () => toggle('message') },
-    { label: 'Author', checked: c.author, act: () => toggle('author') },
-    { label: 'Date / Time', checked: c.date, act: () => toggle('date') },
-    { label: 'Sha', checked: c.sha, act: () => toggle('sha') },
-    { label: 'Changes', checked: c.changes, act: () => toggle('changes') },
+    col('Branch / Tag', 'ref'),
+    col('Graph', 'graph'),
+    col('Commit message', 'message'),
+    col('Author', 'author'),
+    col('Date / Time', 'date'),
+    col('Sha', 'sha'),
     '-',
     { label: 'Compact Graph Column', checked: set.compactGraph, act: () => A2.saveSettings({ compactGraph: !set.compactGraph }) },
     { label: 'Smart Branch Visibility', checked: smart, act: () => A2.saveSettings({ smartVisibility: { ...set.smartVisibility, [path]: !smart } }) },
     '-',
-    { label: 'Reset columns to default layout', act: () => { A2.saveSettings({ graphColumns: { ref: true, graph: true, message: true, author: false, date: false, sha: false, changes: false }, compactGraph: false }); autoReset() } },
-    { label: 'Reset columns to compact layout', act: () => { A2.saveSettings({ graphColumns: { ref: true, graph: true, message: true, author: false, date: false, sha: false, changes: false }, compactGraph: true }); autoReset() } }
+    { label: 'Reset columns to default layout', act: () => reset(false) },
+    { label: 'Reset columns to compact layout', act: () => reset(true) }
   ])
 }
 
@@ -470,6 +538,7 @@ export async function fileMenu(path: string, f: FileChange, where: 'unstaged' | 
   const s = A.snap(path)
   const list = where === 'unstaged' ? s.status.unstaged : where === 'staged' ? s.status.staged : []
   const multi = sel.length > 1 && sel.includes(f.path) ? list.filter((x) => sel.includes(x.path)) : [f]
+  if (multi.length > 1 && (where === 'unstaged' || where === 'staged')) return WM.multiFileMenu(path, multi, where)
   const name = f.path.split('/').pop()!
   const ext = name.includes('.') ? '.' + name.split('.').pop() : ''
   const isNew = f.status === '?' || f.status === 'A'
@@ -487,12 +556,12 @@ export async function fileMenu(path: string, f: FileChange, where: 'unstaged' | 
   const lfs = where === 'unstaged' || where === 'staged' ? await api.lfsInfo(path).then((i) => i.enabled).catch(() => false) : false
   const ignoreLfs: MI[] = where === 'unstaged' || where === 'staged' ? [
     { label: 'Ignore', sub: [
-      { label: `Ignore '${name}'`, act: () => ignorePath(path, f.path) },
-      ...(ext ? [{ label: `All files with the extension '${ext}'`, act: () => ignorePath(path, `*${ext}`) }] : [])
+      ...QM.ignoreFileItems(path, f, name, ext)
     ] },
     ...(lfs && isNew ? [{ label: 'LFS', sub: [
       { label: `Track '${name}'`, act: () => A.run(path, () => api.lfsTrack(path, f.path)) },
-      ...(ext ? [{ label: `Track all files with the extension '${ext}'`, act: () => A.run(path, () => api.lfsTrack(path, `*${ext}`)) }] : [])
+      ...(ext ? [{ label: `Track all files with the extension '${ext}'`, act: () => A.run(path, () => api.lfsTrack(path, `*${ext}`)) }] : []),
+      ...QM.lfsFolderItem(path, f.path)
     ] } as MI] : [])
   ] : []
   // tracked files also offer their history and blame
@@ -502,6 +571,7 @@ export async function fileMenu(path: string, f: FileChange, where: 'unstaged' | 
     { label: 'File History', act: () => updateRepo(path, { center: { kind: 'history', file: f.path } }) },
     { label: 'File Blame', act: () => updateRepo(path, { center: { kind: 'history', file: f.path, blame: true } }), enabled: f.status !== 'D' }
   ]
+  const copyContents: MI[] = f.status === 'D' ? [] : [{ label: 'Copy file contents to clipboard', act: () => QM.copyFileContents(path, f, where === 'unstaged' ? undefined : fctx) }]
   const filePatch = { label: 'Create patch from file changes', act: () => createFilePatch(path, f.path, where === 'staged') }
   if (where === 'unstaged') return A.popup([
     { label: multi.length > 1 ? `Stage ${multi.length} files` : 'Stage', act: () => A.stageFiles(path, multi) },
@@ -511,17 +581,20 @@ export async function fileMenu(path: string, f: FileChange, where: 'unstaged' | 
     ...historyBlame,
     '-', ...open, '-',
     { label: 'Copy file path', act: () => api.copy(f.path) },
+    ...copyContents,
     filePatch,
     '-', ...editDelete
   ])
   if (where === 'staged') return A.popup([
     { label: multi.length > 1 ? `Unstage ${multi.length} files` : 'Unstage', act: () => A.unstageFiles(path, multi) },
+    { label: 'Discard changes', act: () => WM.discardStaged(path, multi) },
     ...(isNew ? [{ label: 'Unstage and delete file', act: async () => { await A.unstageFiles(path, [f]); await confirmDeleteFile(path, f.path) } } as MI] : []),
     ...ignoreLfs,
     { label: 'Stash file', act: () => A.run(path, () => api.stashPaths(path, multi.map((x) => x.path))) },
     ...historyBlame,
     '-', ...open, '-',
     { label: 'Copy file path', act: () => api.copy(f.path) },
+    ...copyContents,
     filePatch,
     '-', ...editDelete
   ])
@@ -545,12 +618,10 @@ export async function fileMenu(path: string, f: FileChange, where: 'unstaged' | 
     { label: 'File Blame', enabled: f.status !== 'D', act: () => ctx && updateRepo(path, { center: { kind: 'history', file: f.path, sha: ctx.kind === 'commit' || ctx.kind === 'stash' ? ctx.sha : undefined, blame: true } }) },
     '-', ...open, '-',
     { label: 'Copy file path', act: () => api.copy(f.path) },
+    ...copyContents,
     '-', ...editDelete,
     '-',
-    { label: 'Restore file from this commit', enabled: ctx?.kind === 'commit' && f.status !== 'D', act: () => {
-      if (ctx?.kind !== 'commit') return
-      return A.run(path, () => api.restoreFile(path, ctx.sha, f.path))
-    } }
+    ctx?.kind === 'commit' ? QM.restoreFilesMenuItem(path, ctx.sha, [f]) : { label: 'Restore file from this commit', enabled: false }
   ])
 }
 
@@ -570,14 +641,16 @@ async function createFilePatch(path: string, file: string, staged: boolean) {
 // ---------------------------------------------------------------------------------------------
 // tabs
 
-export function tabMenu(id: string): Promise<void> {
+/** extra: the worktree group items (Close group / Close others in group) */
+export function tabMenu(id: string, extra: MI[] = []): Promise<void> {
   const s = getState()
   const idx = s.tabs.findIndex((t) => t.id === id)
   return A.popup([
     { label: 'Close tab', act: () => A.closeTab(id) },
     { label: 'Close other tabs', act: async () => { for (const t of s.tabs) if (t.id !== id) await A.closeTab(t.id) }, enabled: s.tabs.length > 1 },
     { label: 'Close tabs to the right', act: async () => { for (const t of s.tabs.slice(idx + 1)) await A.closeTab(t.id) }, enabled: idx < s.tabs.length - 1 },
-    { label: 'Alias repository', act: () => A2.renameTab(id) },
+    ...extra,
+    ...(s.tabs[idx]?.path ? [{ label: 'Alias repository', act: () => A2.renameTab(id) }] : []),
     '-',
     { label: 'Reopen Closed Tab', act: () => A.reopenClosedTab(), enabled: A.hasClosedTabs(), accelerator: 'CommandOrControl+Shift+T' }
   ])
@@ -601,16 +674,11 @@ export async function dropMenu(path: string, src: Ref, target: Ref): Promise<voi
   } else if (cur && src.name === cur.name) {
     items.push(...(await mergeItems(path, target)), ...rebaseItems(path, target, target.sha))
   } else if (target.type === 'head') {
+    if (src.type === 'head') items.push({ label: `Rebase ${src.short} onto ${target.short}`, act: () => QM.rebaseOtherBranch(path, src.short, target.short) })
     items.push({ label: `Checkout ${target.short} and merge ${src.short}`, act: async () => { await A.checkoutRef(path, target); await A.mergeInto(path, src.short) } })
   }
   if (!items.length) return
   return A.popup(items)
-}
-
-async function ignorePath(path: string, pattern: string): Promise<void> {
-  const cur = await api.readFile(path, '.gitignore')
-  const next = `${cur.replace(/\s*$/, '')}${cur.trim() ? '\n' : ''}${pattern}\n`
-  await A.run(path, () => api.writeFile(path, '.gitignore', next), { success: `Added ${pattern} to .gitignore` })
 }
 
 export { ffIfPossible }

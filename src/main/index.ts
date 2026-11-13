@@ -1,21 +1,30 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, nativeImage, nativeTheme } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
 import { spawn, execFile } from 'node:child_process'
-import { watch, FSWatcher, existsSync, statSync, rmSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import * as git from './git'
 import * as providers from './providers'
-import { setGitPath, findGit, READ_ONLY, activityLog } from './gitcore'
+import { setGitPath, findGit, READ_ONLY, activityLog, setExtendedLogging } from './gitcore'
 import { scanGitKraken, gitkrakenSettings } from './gitkraken'
-import { buildAppMenu, setMenuState } from './appmenu'
+import { buildAppMenu, setMenuState, refreshUpdateMenu } from './appmenu'
 import * as ex from './extras'
 import * as term from './terminal'
 import * as undo from './undo'
 import * as updater from './updater'
+import { createRepoWatcher } from './watcher'
+import * as cp from './commitpanel'
+import { quickApi } from './quick'
 import { getSettings, updateSettings, flushSettings, addRecent } from './settings'
+import * as launch from './launch'
+import * as logs from './logs'
+import * as deeplink from './deeplink'
+import { k2Api } from './k2'
+import { helpText, type CliRequest } from '../shared/cli'
 import type { Api } from '../shared/api'
-import type { MenuItemSpec } from '../shared/types'
+import type { MenuItemSpec, OpResult } from '../shared/types'
+import { repoSummary, scanRepos } from './repoScan'
 
 // Isolated profile (used for automated testing / side-by-side instances): settings, lock and caches live elsewhere.
 if (process.env.SUPERGIT_USER_DATA) app.setPath('userData', process.env.SUPERGIT_USER_DATA)
@@ -29,6 +38,15 @@ function applySshSettings(): void {
   else delete process.env.GIT_SSH_COMMAND
 }
 
+/** native chrome follows the theme: 'system' tracks the OS, light* themes are light, the rest dark */
+function themeSource(theme: string): 'system' | 'light' | 'dark' {
+  return theme === 'system' ? 'system' : theme.startsWith('light') ? 'light' : 'dark'
+}
+function themeBackground(theme: string): string {
+  if (theme === 'system') return nativeTheme.shouldUseDarkColors ? '#1c1e23' : '#fcfcfc'
+  return theme === 'gk-dark' ? '#1c1e23' : theme === 'light-legacy' ? '#ffffff' : theme.startsWith('light') ? '#fcfcfc' : '#090A0B'
+}
+
 function createWindow(): void {
   const s = getSettings()
   win = new BrowserWindow({
@@ -37,7 +55,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 560,
     show: false,
-    backgroundColor: s.theme === 'light' ? '#fcfcfc' : '#090A0B',
+    backgroundColor: themeBackground(s.theme),
     title: 'SuperGit',
     icon: nativeImage.createFromPath(path.join(__dirname, '../../build/icon.png')),
     webPreferences: {
@@ -48,7 +66,10 @@ function createWindow(): void {
       spellcheck: true
     }
   })
-  win.once('ready-to-show', () => win?.show())
+  launch.attach(win.webContents)
+  logs.captureRendererErrors(win.webContents)
+  win.webContents.once('did-finish-load', () => logs.mark('renderer loaded'))
+  win.once('ready-to-show', () => { win?.show(); logs.mark('window shown'); logs.flushPerf() })
   win.webContents.on('did-finish-load', () => win?.webContents.setZoomFactor(getSettings().zoom))
   win.webContents.setWindowOpenHandler(({ url }) => { void shell.openExternal(url); return { action: 'deny' } })
   win.webContents.on('before-input-event', (e, input) => {
@@ -73,6 +94,22 @@ async function trackHead<T extends { ok?: boolean }>(p: string, op: () => Promis
   return res
 }
 
+/**
+ * cherry pick / revert / patch of changes the branch already has: git stops with "now empty" (or changes nothing);
+ * like the original that is a success with a "the current branch already has all changes" note.
+ */
+async function noopAware<T extends OpResult>(p: string, kind: 'cherry-pick' | 'revert' | 'am' | 'apply', op: () => Promise<T>): Promise<T> {
+  const fingerprint = async () => [(await git.getHead(p)).sha, (await git.tryOut(p, ['write-tree']))?.trim(), (await git.tryOut(p, ['status', '--porcelain']))?.trim()].join('|')
+  const before = await fingerprint()
+  const res = await op()
+  if (!res.ok && !res.conflicts && /now empty|nothing to commit|empty commit|Patch is empty/i.test(res.error ?? '')) {
+    if (kind !== 'apply') await git.g(p, [kind, '--skip'], { allowFail: true })
+    return { ...res, ok: true, error: undefined, noop: true }
+  }
+  if (res.ok && !res.conflicts && before === await fingerprint()) return { ...res, noop: true }
+  return res
+}
+
 /** a finished rebase is journaled with the commit it started from, so Undo can restore it */
 async function trackRebase<T extends { ok?: boolean; conflicts?: unknown }>(p: string, op: () => Promise<T>): Promise<T> {
   const before = (await git.getHead(p)).sha
@@ -84,48 +121,28 @@ async function trackRebase<T extends { ok?: boolean; conflicts?: unknown }>(p: s
 
 /** "Keep submodules up to date": update submodules after a git action moved HEAD */
 async function syncSubmodules(p: string): Promise<void> {
-  if (!getSettings().updateSubmodules || !existsSync(path.join(p, '.gitmodules'))) return
-  await git.net(p, 'submodule', ['submodule', 'update', '--init', '--recursive'], { allowFail: true })
+  if (!existsSync(path.join(p, '.gitmodules'))) return
+  // Preferences → Repo → Submodules: "Use global setting" / "Enabled for this repo" / "Disabled for this repo"
+  const override = await git.getConfig(p, 'supergit.updateSubmodules')
+  if (!(override === 'true' ? true : override === 'false' ? false : getSettings().updateSubmodules)) return
+  // the renderer shows an "Updating submodule | Path: ..." progress toast when this takes a while (like the original)
+  const send = (text: string) => win?.webContents.send('progress', { repo: p, op: 'submodule-update', text })
+  try {
+    const subs = await git.getSubmodules(p)
+    for (const s of subs.length ? subs : [{ path: '' }]) {
+      send(s.path)
+      await git.net(p, 'submodule', ['submodule', 'update', '--init', '--recursive', ...(s.path ? ['--', s.path] : [])], { allowFail: true })
+    }
+  } finally { send('') }
 }
 
 
 // ---------------------------------------------------------------------------------------------
 // Watchers
 
-const watchers = new Map<string, { list: FSWatcher[]; timer: NodeJS.Timeout | null; refs: number }>()
-const IGNORE = /(^|[\\/])\.git[\\/](objects|logs|lfs)([\\/]|$)|\.lock$|(^|[\\/])node_modules([\\/]|$)|(^|[\\/])\.vs([\\/]|$)/
-
-async function startWatch(p: string) {
-  const key = p.toLowerCase()
-  const existing = watchers.get(key)
-  if (existing) { existing.refs++; return }
-  const entry = { list: [] as FSWatcher[], timer: null as NodeJS.Timeout | null, refs: 1 }
-  watchers.set(key, entry)
-  const notify = (file: string | null) => {
-    if (file && IGNORE.test(file)) return
-    if (entry.timer) clearTimeout(entry.timer)
-    entry.timer = setTimeout(() => win?.webContents.send('repo-changed', p), 350)
-  }
-  const add = (dir: string) => {
-    try { entry.list.push(watch(dir, { recursive: true }, (_e, f) => notify(f ? String(f) : null))) } catch { /* ignore */ }
-  }
-  add(p)
-  const info = await git.resolveRepo(p)
-  if (info && !info.gitDir.toLowerCase().startsWith(p.toLowerCase())) {
-    add(info.gitDir)
-    const common = path.join(info.gitDir, '..', '..') // <main>/.git for worktrees
-    if (existsSync(path.join(common, 'refs'))) add(path.join(common, 'refs'))
-  }
-}
-function stopWatch(p: string) {
-  const key = p.toLowerCase()
-  const e = watchers.get(key)
-  if (!e) return
-  if (--e.refs > 0) return
-  e.list.forEach((w) => w.close())
-  if (e.timer) clearTimeout(e.timer)
-  watchers.delete(key)
-}
+const repoWatcher = createRepoWatcher({ onChange: (p) => win?.webContents.send('repo-changed', p), resolve: (p) => git.resolveRepo(p) })
+const startWatch = (p: string) => repoWatcher.start(p)
+const stopWatch = (p: string) => repoWatcher.stop(p)
 
 // ---------------------------------------------------------------------------------------------
 // Context menus (native, like the original)
@@ -171,6 +188,8 @@ function openTerminal(p: string): Promise<void> {
 // API implementation
 
 const api: Api = {
+  ...quickApi,
+  ...k2Api,
   async pickDirectory(title, defaultPath) {
     const r = await dialog.showOpenDialog(win!, { title, defaultPath, properties: ['openDirectory', 'createDirectory'] })
     return r.canceled ? null : r.filePaths[0]
@@ -196,7 +215,7 @@ const api: Api = {
   openTerminal,
   async copy(text) { clipboard.writeText(text) },
   async setZoom(z) {
-    const zoom = Math.min(2, Math.max(0.6, Math.round(z * 100) / 100))
+    const zoom = Math.min(3, Math.max(0.8,Math.round(z * 100) / 100))
     updateSettings({ zoom })
     win?.webContents.setZoomFactor(zoom)
     win?.webContents.send('zoom', zoom)
@@ -206,6 +225,7 @@ const api: Api = {
   async getSettings() { return getSettings() },
   async setSettings(patch) {
     if (patch.gitPath !== undefined) setGitPath(patch.gitPath)
+    if (patch.extendedLogging !== undefined) setExtendedLogging(patch.extendedLogging)
     if (patch.sshUseAgent !== undefined || patch.sshPrivateKey !== undefined) applySshSettings()
     return updateSettings(patch)
   },
@@ -222,7 +242,8 @@ const api: Api = {
   checkForUpdates: (manual) => updater.check(manual),
   installUpdate: () => updater.installNow(),
   gitkrakenSettings: () => gitkrakenSettings(),
-  async takeStartupFolder() { const d = startupFolder; startupFolder = null; return d },
+  /** the renderer has started: what the command line / a link asked for arrives now as commands */
+  async takeStartupFolder() { launch.rendererReady(); return null },
   /** set by the installer's "Import from GitKraken" option; read once */
   async takeGitKrakenImportFlag() {
     const f = path.join(app.getPath('userData'), 'import-gitkraken.flag')
@@ -321,7 +342,11 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
     await syncSubmodules(p)
     return local
   },
-  createBranch: (p, name, at, doCheckout) => git.createBranch(p, name, at, doCheckout),
+  async createBranch(p, name, at, doCheckout) {
+    const r = await git.createBranch(p, name, at, doCheckout)
+    if (doCheckout) await syncSubmodules(p)
+    return r
+  },
   async deleteBranch(p, name, force) {
     const sha = await git.revParse(p, `refs/heads/${name}`)
     const upstream = (await git.tryOut(p, ['for-each-ref', '--format=%(upstream:short)', `refs/heads/${name}`]))?.trim()
@@ -347,11 +372,12 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   },
   editRemote: (p, o, n, f, pu) => git.editRemote(p, o, n, f, pu),
 
-  merge: (p, ref, opts) => trackHead(p, () => git.merge(p, ref, opts)),
+  // Preferences → Commit → Merge Behavior: local merges only stage the changes
+  merge: (p, ref, opts) => trackHead(p, () => git.merge(p, ref, getSettings().mergeSquash && !opts?.ffOnly ? { ...opts, squash: true } : opts)),
   rebase: (p, onto) => trackRebase(p, () => git.rebase(p, onto)),
   interactiveRebase: (p, base, items) => trackRebase(p, () => git.interactiveRebase(p, base, items)),
-  cherryPick: (p, shas, noCommit) => trackHead(p, () => git.cherryPick(p, shas, noCommit)),
-  revert: (p, sha, isMerge, noCommit) => trackHead(p, () => git.revert(p, sha, isMerge, noCommit)),
+  cherryPick: (p, shas, noCommit) => noopAware(p, 'cherry-pick', () => trackHead(p, () => git.cherryPick(p, shas, noCommit))),
+  revert: (p, sha, isMerge, noCommit) => noopAware(p, 'revert', () => trackHead(p, () => git.revert(p, sha, isMerge, noCommit))),
   async reset(p, sha, mode) {
     // a hard reset over local changes keeps them in a commit named in the reflog, so Undo restores them too
     const saved = mode === 'hard' ? (await git.tryOut(p, ['stash', 'create']))?.trim() : undefined
@@ -401,8 +427,14 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   signature: (p, sha) => ex.getSignature(p, sha),
   treeFiles: (p, sha) => ex.getTreeFiles(p, sha),
   listFiles: (p) => ex.listFiles(p),
+  repoIsEmpty: (p) => ex.repoIsEmpty(p),
+  repoSummary: (p) => repoSummary(p),
+  scanRepos: (f) => scanRepos(f),
+  makeInitialCommit: (p) => ex.makeInitialCommit(p),
   readFile: (p, f) => ex.readRepoFile(p, f),
   commitTemplate: (p) => ex.getCommitTemplate(p),
+  commitHooks: (p) => cp.getCommitHooks(p),
+  createFilesPatch: (p, files, st, o) => cp.createFilesPatch(p, files, st, o),
   async gitConfigUnset(key, repo) { await git.g(repo ?? os.homedir(), ['config', ...(repo ? ['--local'] : ['--global']), '--unset', key], { allowFail: true }) },
   gitflowInit: (p, cfg) => ex.gitflowInit(p, cfg),
   gitflowStart: (p, t, n) => ex.gitflowStart(p, t, n),
@@ -421,12 +453,18 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
     return r.canceled ? null : r.filePaths[0]
   },
   createPatch: (p, shas, file) => ex.createPatch(p, shas, file),
-  applyPatch: (p, file, asCommits) => trackHead(p, () => ex.applyPatch(p, file, asCommits)),
+  applyPatch: (p, file, asCommits) => noopAware(p, asCommits ? 'am' : 'apply', () => trackHead(p, () => ex.applyPatch(p, file, asCommits))),
   submoduleUpdate: (p, s) => ex.submoduleUpdate(p, s),
   deleteSubmodule: (p, sub, commit) => git.deleteSubmodule(p, sub, commit),
   submoduleAdd: (p, u, s) => ex.submoduleAdd(p, u, s),
   submoduleSync: (p) => ex.submoduleSync(p),
-  openInEditor: (p, f) => ex.openInEditor(p, f, getSettings().externalEditor),
+  openInEditor: (p, f, e) => {
+    if (e) return ex.openInEditor(p, f, e)
+    const s = getSettings()
+    // Preferences → External Tools → Editor "<Custom>": separate commands for files and for the repository
+    const editor = s.editorPreset === 'custom' ? ((f ? s.editorOpenFileCmd : s.editorOpenRepoCmd) || s.editorOpenFileCmd || s.externalEditor) : s.externalEditor
+    return ex.openInEditor(p, f, editor)
+  },
   externalMergeTool: (p, f) => ex.externalMergeTool(p, f),
   externalDiffTool: (p, f, st, a, b) => ex.externalDiffTool(p, f, st, a, b),
   sshKeys: () => ex.listSshKeys(),
@@ -434,8 +472,8 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
   gpgKeys: () => ex.listGpgKeys(),
   async setTheme(theme) {
     updateSettings({ theme })
-    nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
-    win?.setBackgroundColor(theme === 'light' ? '#fcfcfc' : '#090A0B')
+    nativeTheme.themeSource = themeSource(theme)
+    win?.setBackgroundColor(themeBackground(theme))
   },
   async termStart(p, cols, rows) { return term.startTerminal(win!.webContents, p, getSettings().terminalShell, cols, rows) },
   async termWrite(id, data) { term.writeTerminal(id, data) },
@@ -444,7 +482,11 @@ Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · 
 
   async undo(p, opts) { const r = await undo.apply(p, 'undo', opts); if (r !== null) await syncSubmodules(p); return r },
   async redo(p, opts) { const r = await undo.apply(p, 'redo', opts); if (r !== null) await syncSubmodules(p); return r },
-  undoState: (p) => undo.preview(p)
+  undoState: (p) => undo.preview(p),
+
+  repoIdentity: (p) => deeplink.repoIdentity(p),
+  commitExists: (p, sha) => deeplink.commitExists(p, sha),
+  fetchForLink: (p, r, tag) => deeplink.fetchForLink(p, r, tag)
 }
 
 ipcMain.handle('api', async (_e, method: keyof Api, args: unknown[]) => {
@@ -455,6 +497,7 @@ ipcMain.handle('api', async (_e, method: keyof Api, args: unknown[]) => {
 
 git.setAuthConfigProvider(providers.gitAuthConfig)
 setGitPath(getSettings().gitPath)
+setExtendedLogging(!!getSettings().extendedLogging)
 applySshSettings()
 git.setIdentityProvider(async (cwd) => {
   const s = getSettings()
@@ -470,31 +513,38 @@ git.setIdentityProvider(async (cwd) => {
 })
 git.setProgressSink((repo, op, text) => win?.webContents.send('progress', { repo, op, text }))
 
-/** a folder passed on the command line ("Open with SuperGit" in Explorer) */
-function folderArg(argv: string[]): string | null {
-  for (const a of argv.slice(1)) {
-    if (!a || a.startsWith('-')) continue
-    try { if (statSync(a).isDirectory()) return path.resolve(a) } catch { /* not a path */ }
-  }
-  return null
+// Command line ("supergit .", "Open with SuperGit" in Explorer) and supergit:// links (see launch.ts).
+// The request is resolved by whichever process was launched and handed to the running one.
+logs.mark('main process started')
+logs.captureErrors()
+const startup: CliRequest = launch.parseLaunch(process.argv, process.cwd())
+if (startup.help || startup.version) {
+  process.stdout.write(startup.help ? `${helpText()}\n` : `${app.getVersion()}\n`)
+  app.exit(0)
 }
-let startupFolder: string | null = folderArg(process.argv)
 
-const gotLock = app.requestSingleInstanceLock()
+const gotLock = !startup.help && !startup.version && app.requestSingleInstanceLock({ path: startup.path, uri: startup.uri })
 if (!gotLock) app.quit()
 else {
-  app.on('second-instance', (_e, argv) => {
+  app.on('second-instance', (_e, argv, workingDirectory, data) => {
     if (win) { if (win.isMinimized()) win.restore(); win.focus() }
-    const dir = folderArg(argv)
-    if (dir) win?.webContents.send('command', `open:${dir}`)
+    const d = data as Partial<CliRequest> | null
+    const req: CliRequest = d && (typeof d.path === 'string' || typeof d.uri === 'string')
+      ? { help: false, version: false, path: d.path, uri: d.uri }
+      : launch.parseLaunch(argv, workingDirectory || process.cwd())
+    void launch.handle(req)
   })
   app.whenReady().then(() => {
+    logs.mark('app ready')
+    launch.registerProtocol()
     app.setAppUserModelId('dev.supergit.app')
     // native context menus / dialogs follow the app theme (dark menus in the dark theme, like the original)
-    nativeTheme.themeSource = getSettings().theme === 'light' ? 'light' : 'dark'
+    nativeTheme.themeSource = themeSource(getSettings().theme)
     createWindow()
     buildAppMenu(win)
     if (win) updater.initUpdater(win)
+    updater.onChange(() => refreshUpdateMenu())
+    void launch.handle(startup)
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
   })
 }

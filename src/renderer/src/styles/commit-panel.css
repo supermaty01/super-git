@@ -1,0 +1,163 @@
+/* Right panel (WIP / commit details), measured on the original at 110% zoom. Loaded after detail.css. */
+
+/* ===== panel and its resize handle ===== */
+.detail-panel { border-left: 1px solid rgba(255,255,255,.08); }
+.resizer.detail-resizer { flex: 0 0 10px; margin: 0 -5px; cursor: ew-resize; }
+.resizer.detail-resizer:hover, body.resizing .resizer.detail-resizer:active { background: transparent; }
+.detail-panel ::-webkit-scrollbar-track { background: var(--panel__bg0); }
+.detail-panel ::-webkit-scrollbar-thumb { border-radius: 10px; }
+
+/* ===== WIP header: "N file changes on [main]" with the discard button on the left ===== */
+.wip-panel .wip-header { flex: 0 0 46px; height: 46px; font-size: 12px; line-height: 17.1429px; color: var(--text-normal); }
+.wip-panel .wip-header-text { display: inline; }
+.wip-panel .wip-header .pill { background: rgb(14,78,92); padding: 0 5px; border-radius: 2px; font-size: 12px; line-height: 17.1429px; }
+.wip-header .btn.wip-discard {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: auto; height: auto; gap: 0;
+  padding: 2.5px 5px; font-size: 12px; line-height: 12px; border-radius: 2px;
+  background: rgba(217,65,61,.1); border: 1px solid rgb(217,65,61); color: var(--text-normal);
+}
+.wip-header .btn.wip-discard:hover { background: rgba(217,65,61,.6); border-color: rgb(217,65,61); color: #fff; }
+.wip-header .btn.wip-discard .icon { width: 10px; height: 12px; }
+.wip-header .btn.wip-discard .fs-2 { font-size: 12px; line-height: 12px; }
+
+/* ===== sort | Path / Tree | (extra) toolbar ===== */
+.file-list-toolbar { height: 26px; padding: 0 5px; margin: 0 0 5px; gap: 0; border-bottom: 0; }
+.commit-detail .file-list-toolbar { padding: 0; }
+.wip-panel .file-list-toolbar { padding: 0 5px; }
+.file-list-toolbar-side { flex: 1 1 0; min-width: 0; display: flex; align-items: center; }
+.file-list-toolbar-side.file-list-toolbar-extra { justify-content: flex-end; }
+.file-list-toolbar .toggle-group { margin: 0; flex: 0 0 auto; }
+.file-list-toolbar .sort-btn {
+  width: 30px; height: 26px; padding: 1px 5px; border: 0; border-radius: 3px; background: transparent; display: flex; align-items: center; justify-content: center;
+  color: var(--text-normal); cursor: pointer;
+}
+.file-list-toolbar .sort-btn:hover { background: rgba(255,255,255,.08); color: var(--text-selected); }
+.file-list-toolbar .sort-btn .icon { width: 20px; height: 16px; }
+.file-list-toolbar .toggle-group .toggle-btn { height: 24px; padding: 0 10px; font-size: 12px; line-height: 18px; gap: 5px; }
+.file-list-toolbar .toggle-btn .icon-bars { width: 10px; height: 12px; }
+.file-list-toolbar .toggle-btn .icon-folder-tree { width: 13px; height: 12px; }
+.file-list-toolbar .view-all { margin-left: 8px; font-size: 12px; line-height: 17.1429px; white-space: nowrap; }
+
+/* ===== Unstaged / Staged sections: always 50/50, no splitter ===== */
+.wip-panel .wip-lists { padding: 0 10px; }
+.wip-panel .wip-section { min-height: 34px; }
+.wip-panel .wip-section-header { flex: 0 0 24px; height: 24px; margin: 5px 0; padding: 0; gap: 0; border-bottom: 0; cursor: default; font-size: 14px; line-height: 20px; }
+.wip-panel .wip-section-toggle { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; cursor: pointer; }
+.wip-panel .wip-section-toggle:hover { color: var(--text-selected); }
+.wip-panel .wip-caret { width: 9px; height: 14px; margin-left: 5px; color: inherit; flex: 0 0 auto; }
+.wip-panel .wip-section-title { margin-left: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wip-panel .wip-section-header .btn { margin-right: 5px; flex: 0 0 auto; }
+.wip-panel .wip-section-body { padding: 0; margin-bottom: 10px; border-top: 1px solid var(--section-border); }
+.wip-panel .wip-subheader { padding: 8px 10px 2px; }
+.wip-panel .btn-xs, .commit-detail .btn-xs { font-size: 12px; font-weight: 600; line-height: 18px; padding: 1px 5px; border-radius: 2px; }
+
+/* ===== file rows ===== */
+.file-node-list { padding: 0; outline: none; }
+.file-row { height: 32px; border-radius: 0; padding: 0 10px; gap: 0; font-size: 14px; line-height: 20px; }
+.file-row .file-status { flex: 0 0 13px; width: 13px; height: 10px; margin-right: 5px; font-size: inherit; }
+.file-row .file-row-action { padding-left: 8px; }
+.file-dir { color: var(--text-disabled); }
+.file-tree-header { justify-content: flex-start; align-items: center; height: 25px; margin-top: 5px; padding: 0 10px; }
+.file-tree-header .btn.file-tree-toggle { border: 0; background: transparent; padding: 0; font-size: 12px; font-weight: 400; line-height: 18px; color: var(--text-normal); }
+.file-tree-header .btn.file-tree-toggle:hover { color: var(--text-selected); border: 0; }
+.file-row.file-dir-row { padding-left: 3px; }
+.file-dir-caret { flex: 0 0 18px; width: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-normal); }
+.file-dir-caret .icon { width: 5px; height: 14px; }
+.file-dir-row .file-name { color: var(--text-disabled); }
+.file-dir-row .file-dir-counts { margin-left: 10px; gap: 10px; font-size: 12px; color: var(--text-normal); }
+.file-dir-row .file-dir-count { gap: 4px; }
+.file-dir-row .file-dir-count .file-status { width: 13px; height: 10px; margin: 0; }
+
+/* ===== commit message panel, resizable at its top grip ===== */
+.wip-panel .commit-panel { flex: 0 0 auto; position: relative; display: flex; flex-direction: column; min-height: 0; padding-top: 10px; }
+.commit-panel-grip { position: absolute; top: 0; left: 0; right: 0; height: 10px; display: flex; align-items: center; justify-content: center; cursor: row-resize; z-index: 1; }
+.commit-panel-grip span { width: 100px; height: 4px; border-radius: 4px; background: rgba(255,255,255,.08); }
+.commit-panel-grip:hover span, body.resizing-rows .commit-panel-grip span { background: rgba(255,255,255,.2); }
+body.resizing-rows, body.resizing-rows * { cursor: row-resize !important; }
+.commit-panel .commit-box { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 0 10px; border-top: 0; }
+
+/* tabs: the active one is open at the bottom, the rest of the row carries the line */
+.commit-panel .commit-tabs { flex: 0 0 31px; height: 31px; display: flex; margin: 0; border-bottom: 0; }
+.commit-panel .commit-tab {
+  height: 31px; padding: 5px 10px; font-size: 14px; line-height: 20px; gap: 5px; color: var(--text-secondary); background: transparent;
+  border: 1px solid transparent; border-bottom: 1px solid var(--section-border);
+}
+.commit-panel .commit-tab:hover { color: var(--text-selected); }
+.commit-panel .commit-tab.active { color: #fff; background: transparent; border-color: var(--section-border); border-bottom-color: transparent; }
+.commit-panel .commit-tab .icon-commit { width: 18px; height: 14px; }
+.commit-panel .commit-tab .icon-stash { width: 16px; height: 16px; }
+.commit-panel .commit-tabs-end { flex: 1 1 auto; border-bottom: 1px solid var(--section-border); }
+
+.commit-panel .amend-check { flex: 0 0 20px; display: flex; align-items: center; margin: 8px 0; font-size: 14px; line-height: 20px; cursor: default; }
+.commit-panel .stash-box { flex: 1 1 auto; min-height: 0; padding-top: 10px; gap: 0; }
+
+/* message box: summary row on a darker strip, 16px summary, description fills the rest */
+.commit-panel .commit-message-inputs {
+  flex: 1 1 auto; min-height: 60px; display: flex; flex-direction: column; padding: 0;
+  background: var(--panel__bg0); border: 1px solid var(--section-border); border-radius: 4px;
+}
+.commit-panel .commit-message-inputs:focus-within { border-color: var(--section-border); }
+.commit-panel .commit-summary-row { flex: 0 0 auto; display: flex; align-items: center; gap: 0; padding-top: 10px; background: rgba(0,0,0,.2); border-radius: 4px 4px 0 0; }
+.commit-panel .commit-summary-input {
+  flex: 1 1 auto; min-width: 0; height: 24.7px; padding: 0 10px; font-size: 16px; line-height: 22.8571px; color: var(--text-normal);
+  border: 1px solid transparent; border-radius: 3px; background: transparent;
+}
+.commit-panel .commit-count { flex: 0 0 auto; padding-right: 4px; margin-right: 6px; font-size: 16px; line-height: 22.8571px; color: var(--text-disabled); cursor: default; }
+.commit-panel .commit-count.over { color: rgb(222,155,67); }
+.commit-panel .commit-description-input {
+  flex: 1 1 auto; min-height: 0; height: auto; width: 100%; resize: none; padding: 5px 10px 0; font-size: 14px; line-height: 20px;
+  color: var(--text-normal); background: rgba(0,0,0,.2); border: 0; border-radius: 0 0 4px 4px;
+}
+.commit-panel .commit-summary-input::placeholder, .commit-panel .commit-description-input::placeholder { color: var(--text-normal); }
+
+/* commit options */
+.commit-panel .commit-options { flex: 0 0 auto; margin-top: 6px; font-size: 14px; line-height: 20px; }
+.commit-panel .commit-options-toggle { height: 24px; display: inline-flex; align-items: center; gap: 5px; color: var(--text-disabled); cursor: pointer; }
+.commit-panel .commit-options-toggle:hover { color: var(--text-selected); }
+.commit-panel .commit-options-toggle .icon { width: 15px; height: 12px; }
+.commit-checkboxes { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; margin: 5px 0 0 5px; max-width: 450px; }
+
+/* commit button: 40px in a 60px row */
+.commit-panel .commit-buttons { flex: 0 0 auto; display: flex; gap: 8px; margin: 0; padding: 10px 0; }
+.commit-panel .btn-commit { flex: 1 1 auto; min-width: 0; min-height: 40px; white-space: normal; text-align: center; padding: 6px 12px; gap: 5px; font-size: 12px; font-weight: 600; line-height: 17.1429px; border-radius: 2px; }
+.commit-panel .btn-commit .icon-commit { width: 15px; height: 12px; }
+.commit-panel .btn-commit.disabled, .commit-panel .btn-commit:disabled { opacity: .5; cursor: not-allowed; }
+.commit-panel .btn-skip { flex: 0 0 70px; }
+
+/* ===== commit details ===== */
+.commit-detail-header { flex: 0 0 46px; height: 46px; justify-content: flex-start; gap: 0; padding: 0 20px; font-size: 12px; line-height: 17.1429px; color: var(--text-normal); }
+.commit-detail-header .commit-sha { margin-left: 5px; color: #fff; }
+.commit-detail-header .commit-sha:hover { text-decoration: none; }
+.wip-banner { min-height: 46px; }
+.commit-detail .commit-message-box { padding: 10px; margin-bottom: 0; }
+.commit-detail .commit-message-summary { margin-bottom: 10px; }
+.commit-detail .message-resize { height: 24px; margin: 0 0 2px; }
+.commit-detail .message-resize span { width: 100px; height: 4px; border-radius: 4px; background: rgba(255,255,255,.08); }
+.commit-detail .message-resize:hover span { background: rgba(255,255,255,.2); }
+.commit-detail .commit-author-row { align-items: center; min-height: 40px; }
+.commit-detail .commit-avatar { width: 40px; height: 40px; border-radius: 2px; }
+.commit-detail .commit-author-name { font-size: 14px; line-height: 19px; }
+.commit-detail .commit-author-date { font-size: 12px; line-height: 17.1429px; color: var(--text-secondary); }
+.commit-detail .commit-author-date span { color: var(--text-normal); }
+.commit-detail .commit-parents { font-size: 12px; line-height: 17.1429px; color: var(--text-secondary); align-self: flex-start; }
+.commit-detail .commit-parent-link { color: var(--text-normal); }
+.commit-detail .file-summary { height: 18px; margin: 20px 0 10px; gap: 0; font-size: 12px; line-height: 17.1429px; }
+.commit-detail .file-summary-item { padding-right: 8px; gap: 4px; }
+.commit-detail .file-summary-item .file-status { width: 13px; height: 10px; }
+.commit-detail .committer-row { margin-top: -18px; }
+
+/* several commits: "Viewing diff between 2 commits" and the original's mini commit cards */
+.multi-commit-title { margin: 0 0 7px; font-size: 15px; font-weight: 500; line-height: 21.4px; color: var(--text-normal); }
+.multi-commits { max-height: 140px; overflow-y: auto; border: 1px solid var(--section-border); margin-bottom: 4px; }
+.multi-commits .compare-card { display: flex; align-items: flex-start; gap: 6px; height: 44px; padding: 6px; margin: 0; border-radius: 0; background: rgb(39,43,47); cursor: pointer; }
+.multi-commits .compare-card + .compare-card { border-top: 1px solid var(--section-border); }
+.multi-commits .compare-card:hover { background: rgb(48,53,58); }
+.compare-card-avatar { flex: 0 0 30px; width: 30px; height: 30px; border-radius: 2px; background-size: cover; image-rendering: pixelated; }
+.compare-card-middle { flex: 1 1 auto; min-width: 0; }
+.multi-commits .compare-card-summary { font-size: 12px; line-height: 16px; color: var(--text-normal); }
+.multi-commits .compare-card-meta { display: block; margin: 0; font-size: 10px; line-height: 16px; color: var(--text-normal); }
+.multi-commits .compare-card-sha { flex: 0 0 auto; font-family: var(--code-font); font-size: 12px; line-height: 16px; color: var(--text-secondary); }
+
+:root[data-theme="light"] .multi-commits .compare-card { background: rgba(0,0,0,.05); }
+:root[data-theme="light"] .detail-panel { border-left-color: rgba(0,0,0,.12); }
+:root[data-theme="light"] .commit-panel-grip span, :root[data-theme="light"] .commit-detail .message-resize span { background: rgba(0,0,0,.12); }

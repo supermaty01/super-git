@@ -25,7 +25,7 @@ export const MonacoDiff = forwardRef<MonacoDiffHandle, { original: string; modif
         ignoreTrimWhitespace: ignoreWs,
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
-        fontFamily: `${font}, Consolas, monospace`,
+        fontFamily: `${font}, Consolas, "Courier New", monospace`,
         ...editorOptions(),
         renderOverviewRuler: true,
         glyphMargin: false,
@@ -49,7 +49,7 @@ export const MonacoDiff = forwardRef<MonacoDiffHandle, { original: string; modif
     }, [])
 
     useEffect(() => {
-      editor.current?.updateOptions({ renderSideBySide: sideBySide, ignoreTrimWhitespace: ignoreWs, wordWrap: wrap ? 'on' : 'off', diffWordWrap: wrap ? 'on' : 'off', fontFamily: `${font}, Consolas, monospace` })
+      editor.current?.updateOptions({ renderSideBySide: sideBySide, ignoreTrimWhitespace: ignoreWs, wordWrap: wrap ? 'on' : 'off', diffWordWrap: wrap ? 'on' : 'off', fontFamily: `${font}, Consolas, "Courier New", monospace` })
     }, [sideBySide, ignoreWs, wrap, font])
 
     useEffect(() => {
@@ -67,7 +67,7 @@ export const MonacoDiff = forwardRef<MonacoDiffHandle, { original: string; modif
   }
 )
 
-export function MonacoFile({ value, file, readOnly, wrap, onChange, onSave }: { value: string; file: string; readOnly: boolean; wrap: boolean; onChange?: (v: string) => void; onSave?: () => void }) {
+export function MonacoFile({ value, file, readOnly, dirty, wrap, onChange, onSave }: { value: string; file: string; readOnly: boolean; dirty?: boolean; wrap: boolean; onChange?: (v: string) => void; onSave?: () => void }) {
   const el = useRef<HTMLDivElement>(null)
   const editor = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
   const font = useStore((s) => s.settings!.editorFont)
@@ -78,8 +78,8 @@ export function MonacoFile({ value, file, readOnly, wrap, onChange, onSave }: { 
 
   useEffect(() => {
     const e = monaco.editor.create(el.current!, {
-      model: createModel(value, file), readOnly, automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false,
-      fontFamily: `${font}, Consolas, monospace`, ...editorOptions(), wordWrap: wrap ? 'on' : 'off', contextmenu: true,
+      model: createModel(value, file), readOnly, automaticLayout: true, minimap: { enabled: true }, scrollBeyondLastLine: false,
+      fontFamily: `${font}, Consolas, "Courier New", monospace`, ...editorOptions(), wordWrap: wrap ? 'on' : 'off', contextmenu: true,
       scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 }
     })
     e.onDidChangeModelContent(() => changeRef.current?.(e.getValue()))
@@ -92,8 +92,8 @@ export function MonacoFile({ value, file, readOnly, wrap, onChange, onSave }: { 
   useEffect(() => { editor.current?.updateOptions({ readOnly, wordWrap: wrap ? 'on' : 'off' }) }, [readOnly, wrap])
   useEffect(() => {
     const e = editor.current
-    if (e && e.getValue() !== value && readOnly) e.setValue(value)
-  }, [value, readOnly])
+    if (e && e.getValue() !== value && (readOnly || !dirty)) e.setValue(value)
+  }, [value, readOnly, dirty])
 
   return <div className="monaco-host" ref={el} />
 }

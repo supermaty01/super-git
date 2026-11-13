@@ -5,6 +5,7 @@ import * as A from '../actions'
 import * as A2 from '../actions2'
 import { api } from '../lib/api'
 import { Icon } from './Icon'
+import { openWorktree } from '../k2worktree'
 
 const HEADS = 'refs/heads/'
 const REMOTES = 'refs/remotes/'
@@ -64,8 +65,8 @@ export function WorktreePanel({ repo, initialRef }: { repo: RepoView; initialRef
     showPrompt({
       kind: 'confirm', message: `Do you want to open Worktree "${effBranch}" now?`,
       buttons: [
-        { label: 'Open Now', style: 'success', run: () => A2.openInThisTab(path, effDir) },
-        { label: 'Open in New Tab', style: 'success', run: () => A.openRepo(effDir) }
+        { label: 'Open Now', style: 'success', run: () => openWorktree(path, effDir, false) },
+        { label: 'Open in New Tab', style: 'success', run: () => openWorktree(path, effDir, true) }
       ]
     })
   }
