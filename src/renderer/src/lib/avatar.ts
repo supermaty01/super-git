@@ -47,10 +47,12 @@ export function avatarUrl(email: string, name = ''): string {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = size * px
   const ctx = canvas.getContext('2d')!
-  // the palette of the original's retro avatars: dark slate background, cream figure
-  ctx.fillStyle = 'rgb(31, 60, 81)'
+  // like the original's retro avatars, every author gets their own pair of colours: a dark saturated
+  // background and a light figure of an independent hue (the pattern uses the other hash bytes)
+  const { bg, fg } = avatarColors(bytes)
+  ctx.fillStyle = bg
   ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.fillStyle = 'rgb(244, 220, 173)'
+  ctx.fillStyle = fg
   // 4 columns x 8 rows, mirrored horizontally
   let bit = 0
   const bits = (n: number) => (bytes[4 + ((n >> 3) % 4)] >> (n & 7)) & 1
@@ -66,6 +68,19 @@ export function avatarUrl(email: string, name = ''): string {
   const url = canvas.toDataURL('image/png')
   cache.set(cacheKey, url)
   return url
+}
+
+/** background / figure colours of a pixel avatar, from the first four hash bytes */
+export function avatarColors(bytes: number[]): { bg: string; fg: string } {
+  // a nibble (0-15) scaled into [lo, hi]
+  const pct = (n: number, lo: number, hi: number) => Math.round(lo + (n / 15) * (hi - lo))
+  const bgHue = Math.round((bytes[0] / 255) * 360)
+  // at least 60° of hue away from the background, so the two colours read as a pair
+  const fgHue = (bgHue + 60 + Math.round((bytes[1] / 255) * 240)) % 360
+  return {
+    bg: `hsl(${bgHue}, ${pct(bytes[2] & 0x0f, 60, 95)}%, ${pct(bytes[2] >> 4, 16, 30)}%)`,
+    fg: `hsl(${fgHue}, ${pct(bytes[3] & 0x0f, 55, 95)}%, ${pct(bytes[3] >> 4, 58, 74)}%)`
+  }
 }
 
 export function initials(name: string): string {

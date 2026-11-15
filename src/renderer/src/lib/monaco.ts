@@ -59,6 +59,43 @@ export function setMonacoTheme(scheme: 'dark' | 'light', bg?: string): void {
   monaco.editor.setTheme('supergit-skin')
 }
 
+// JSON: Monaco's own JSON support needs its language worker, so a plain tokenizer is registered instead,
+// with the token names the built-in themes colour (keys blue, values and true/false/null orange)
+monaco.languages.register({
+  id: 'json',
+  aliases: ['JSON', 'json'],
+  extensions: ['.json', '.jsonc', '.json5', '.jsonl', '.har', '.webmanifest', '.code-workspace', '.babelrc', '.eslintrc', '.jshintrc', '.prettierrc', '.swcrc', '.lintstagedrc'],
+  filenames: ['composer.lock', '.babelrc', '.eslintrc', '.jshintrc', '.prettierrc', '.swcrc'],
+  mimetypes: ['application/json']
+})
+monaco.languages.setLanguageConfiguration('json', {
+  comments: { lineComment: '//', blockComment: ['/*', '*/'] },
+  brackets: [['{', '}'], ['[', ']']],
+  autoClosingPairs: [{ open: '{', close: '}' }, { open: '[', close: ']' }, { open: '"', close: '"', notIn: ['string'] }]
+})
+monaco.languages.setMonarchTokensProvider('json', {
+  defaultToken: '',
+  tokenPostfix: '.json',
+  tokenizer: {
+    root: [
+      [/\s+/, ''],
+      [/\/\/.*$/, 'comment'],
+      [/\/\*/, 'comment', '@comment'],
+      [/"(?:[^"\\]|\\.)*"(?=\s*:)/, 'string.key'],
+      [/"(?:[^"\\]|\\.)*"?/, 'string.value'],
+      [/-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/, 'number'],
+      [/\b(?:true|false|null)\b/, 'keyword'],
+      [/[{}[\]]/, 'delimiter.bracket'],
+      [/[,:]/, 'delimiter']
+    ],
+    comment: [
+      [/[^*]+/, 'comment'],
+      [/\*\//, 'comment', '@pop'],
+      [/\*/, 'comment']
+    ]
+  }
+})
+
 const extMap = new Map<string, string>()
 const nameMap = new Map<string, string>()
 for (const l of monaco.languages.getLanguages()) {
@@ -131,7 +168,8 @@ let skipClasses: Promise<Set<string>> | null = null
 function tokenSkipClasses(): Promise<Set<string>> {
   skipClasses ??= Promise.all([
     monaco.editor.colorize('// c', 'javascript', {}),
-    monaco.editor.colorize('"s"', 'javascript', {})
+    monaco.editor.colorize('"s"', 'javascript', {}),
+    monaco.editor.colorize('"k":', 'json', {})
   ]).then((html) => new Set(html.map((h) => /class="(mtk\d+)"/.exec(h)?.[1]).filter((x): x is string => !!x)))
   return skipClasses
 }

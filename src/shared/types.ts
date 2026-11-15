@@ -149,6 +149,8 @@ export interface DiffLine {
   content: string
   oldLine?: number
   newLine?: number
+  /** changed characters of a modified line, [start, end) (hunks from the editor's line diff) */
+  ranges?: Array<[number, number]>
 }
 
 export interface DiffHunk {

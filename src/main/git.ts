@@ -11,6 +11,7 @@ import type {
   OpResult, Commit, BlameLine, HeadInfo, CommitOptions, Submodule, GitflowConfig
 } from '../shared/types'
 import { cloneArgs, type CloneOptions } from '../shared/clone'
+import { editorHunks, hunksReproduce } from './linediff'
 
 /** Supplies auth config (e.g. Azure DevOps PAT header) for network operations. */
 let authConfigProvider: () => Array<[string, string]> = () => []
@@ -340,6 +341,12 @@ export async function getFileContents(cwd: string, ctx: FileContext, ignoreWhite
       const r = await g(cwd, diffArgs, { allowFail: true })
       diff = parseDiff(r.stdout)[0] ?? null
       if (!diff && !orig && mod) diff = synthesizeAddDiff(p, toText(mod))
+      // like the original: hunks from the editor's line diff rather than git's, when git's diff was
+      // taken on these exact texts (clean filters like autocrlf or LFS, or -w, make it differ)
+      else if (diff?.hunks.length && orig && mod && !ignoreWhitespace && !diff.headerLines.some((l) => /(^| )160000( |$)/.test(l))) {
+        const o = toText(orig), m = toText(mod)
+        if (hunksReproduce(o, m, diff.hunks)) diff.hunks = editorHunks(o, m) ?? diff.hunks
+      }
     } else diff = synthesizeAddDiff(p, toText(mod))
   }
   const res: FileContents = { original: binary ? '' : toText(orig), modified: binary ? '' : toText(mod), binary, diff }

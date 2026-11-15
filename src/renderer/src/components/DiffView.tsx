@@ -213,6 +213,11 @@ const HunkView = forwardRef<HunkViewHandle, { repo: RepoView; ctx: FileContext; 
   // changed words inside modified lines: each run of removed lines is paired with the added run after it
   const words = useMemo(() => hunks.map((h) => {
     const marks = new Map<number, Array<[number, number]>>()
+    // hunks from the editor's line diff carry the changed characters already
+    if (h.lines.some((l) => l.ranges)) {
+      h.lines.forEach((l, i) => { if (l.ranges?.length) marks.set(i, l.ranges) })
+      return marks
+    }
     for (let i = 0; i < h.lines.length;) {
       if (h.lines[i].type !== 'del') { i++; continue }
       const dels: number[] = []
