@@ -4,3 +4,4 @@ out-verify/
 dist/
 *.log
 .DS_Store
+.claude/
